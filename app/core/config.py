@@ -1,0 +1,1 @@
+PINECONE_FREE_TIER = True
