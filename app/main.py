@@ -6,21 +6,22 @@ import tempfile
 import os
 
 from app.services.bookshelf_service import BookshelfService
-from app.schemas.book import Book, Answer
+from app.schemas.book import Answer, MetaBook
 from app.core import config as settings
 
 app = FastAPI(title="Bookshelf API")
 controller = BookshelfService()
 
 
-@app.get("/bookshelf", summary="Get Indexed Books", response_model=list[Book])
+@app.get("/bookshelf", summary="Get Indexed Books", response_model=list[str])
 async def get_books_list():
     return await controller.get_all_books()
 
 
-@app.get("/bookshelf/{book_id}", summary="Get Meta from Book", response_model=Book)
+@app.get("/bookshelf/{book_id}", summary="Get Meta from Book", response_model=MetaBook)
 async def get_book_info(book_id: str):
     book = await controller.get_book(book_id)
+
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
     return book
@@ -71,8 +72,6 @@ async def ask_question(book_id: str, q: Annotated[str, Query(max_length=300)]):
 
 
 @app.delete("/bookshelf/{book_id}", summary="Remove Book")
-async def delete_book(book_id: str):
-    success = await controller.remove_book(book_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Book not found")
-    return {"message": "Book deleted successfully"}
+async def delete_book(book_id: str, background_tasks: BackgroundTasks):
+    background_tasks.add_task(controller.remove_book, book_id)
+    return {"status": "accepted", "book_id": book_id}

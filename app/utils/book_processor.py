@@ -4,6 +4,7 @@ Keep low-level details here so controller stays orchestrator-only.
 """
 
 import os
+import json
 from typing import List, Tuple, Any, Dict
 import asyncio
 import mammoth
@@ -168,9 +169,6 @@ async def get_embeddings(texts: List[str]) -> List[List[float]]:
     return await asyncio.to_thread(_encode_sync, texts)
 
 
-# app/utils.py (или рядом с кодом контроллера)
-
-
 def sanitize_metadata(meta: Dict[str, Any]) -> Dict[str, Any]:
     """
     Приводит метаданные к типам, которые поддерживает Pinecone.
@@ -197,3 +195,57 @@ def sanitize_metadata(meta: Dict[str, Any]) -> Dict[str, Any]:
         # fallback: сериализуем в строку
         out[k] = str(v)
     return out
+
+
+def to_primitive(obj: Any):
+    # примитивы — возвращаем как есть
+    if isinstance(obj, (str, int, float, bool, type(None))):
+        return obj
+    # dict / mapping
+    if isinstance(obj, dict):
+        return {k: to_primitive(v) for k, v in obj.items()}
+    # списки/кортежи/сеты
+    if isinstance(obj, (list, tuple, set)):
+        return [to_primitive(v) for v in obj]
+
+    # pydantic v2
+    if hasattr(obj, "model_dump"):
+        try:
+            return to_primitive(obj.model_dump())
+        except Exception:
+            pass
+
+    # pydantic v1 / dataclasses / openapi models
+    if hasattr(obj, "dict"):
+        try:
+            return to_primitive(obj.dict())
+        except Exception:
+            pass
+
+    # some OpenAPI-generated models
+    if hasattr(obj, "to_dict"):
+        try:
+            return to_primitive(obj.to_dict())
+        except Exception:
+            pass
+
+    # sometimes has json serialization method
+    if hasattr(obj, "to_json"):
+        try:
+            return json.loads(obj.to_json())
+        except Exception:
+            pass
+
+    # fallback: try vars/__dict__
+    try:
+        d = vars(obj)
+        if isinstance(d, dict) and d:
+            return to_primitive(d)
+    except TypeError:
+        pass
+
+    # last resort — строковое представление (без падения)
+    try:
+        return str(obj)
+    except Exception:
+        return repr(obj)

@@ -2,7 +2,7 @@ import uuid
 import asyncio
 import os
 from typing import Optional
-from app.schemas.book import Book, Answer
+from app.schemas.book import Answer, MetaBook
 
 from app.services.pinecone_service import PineconeService
 from app.core.jobs import JobStore
@@ -21,8 +21,6 @@ class BookshelfService:
     def __init__(self):
         self.pinecone = PineconeService()
         self.jobs = JobStore()  # simple in-memory; swap for DB in prod
-        # Хранилище книг (в реальном проекте - БД)
-        # books_storage: Dict[str, Book] = {}
 
     def enqueue_file(
         self, file_path: str, filename: str, callback_url: Optional[str] = None
@@ -42,33 +40,23 @@ class BookshelfService:
     def get_job_status(self, book_id: str):
         return self.jobs.get(book_id)
 
-    async def get_book(book_id: str) -> Optional[Book]:
-        # return books_storage.get(book_id)
-        pass
+    async def get_book(self, book_id: str) -> MetaBook:
+        book = self.pinecone.get_book_metadata(book_id)
 
-    async def get_all_books() -> list[Book]:
-        # return list(books_storage.values())
-        pass
+        return book
 
-    async def ask_book_question(book_id: str, question: str) -> Answer:
-        # if book_id not in books_storage:
-        #     raise ValueError("Book not found")
+    async def get_all_books(self) -> list[str]:
+        indexes = self.pinecone.list_indexes()
+        return indexes
 
-        # # Получение ответа из Pinecone
-        # answer, sources = await pinecone_service.query_book(book_id, question)
-
+    async def ask_book_question(self, book_id: str, question: str) -> Answer:
         # return Answer(answer=answer, sources=sources)
         pass
 
-    async def remove_book(book_id: str) -> bool:
-        # if book_id in books_storage:
-        #     # Удаление из Pinecone
-        #     await pinecone_service.delete_book_index(book_id)
-        #     # Удаление из локального хранилища
-        #     del books_storage[book_id]
-        #     return True
-        # return False
-        pass
+    async def remove_book(self, book_id: str):
+        index_name = self.pinecone.create_index_name(book_id)
+        self.pinecone.delete_index(index_name)
+        # return self.pinecone.delete_index_safe(index_name)
 
     async def process_file(self, book_id: str):
         job = self.jobs.get(book_id)
@@ -145,7 +133,7 @@ class BookshelfService:
                     if emb_dim is None:
                         raise RuntimeError("Received empty embeddings from provider")
                     # This will create or switch to a dense-compatible index if needed
-                    index = self.pinecone.create_index(book_id)
+                    index = self.pinecone.create_index_name(book_id)
                     chosen_index = self.pinecone.ensure_index_for_dimension(
                         emb_dim, index
                     )

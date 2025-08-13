@@ -12,7 +12,9 @@ Public methods:
 from typing import List, Optional, Tuple
 from pinecone import Pinecone, ServerlessSpec
 
+from app.utils.book_processor import to_primitive
 from app.core import config as settings
+from app.schemas.book import MetaBook
 
 
 class PineconeService:
@@ -31,7 +33,7 @@ class PineconeService:
         # default dim is a fallback; prefer using the actual embeddings dimension
         self.default_dim = default_dim
 
-    def create_index(self, book_id: str):
+    def create_index_name(self, book_id: str):
         return f"book-{book_id}"
 
     def _describe_index(self, name: str) -> dict:
@@ -143,7 +145,165 @@ class PineconeService:
         )
 
     def delete_index(self, name: str):
-        return self.pc.delete_index(name)
+        try:
+            self.pc.delete_index(name)
+        except Exception as e:
+            # логируем ошибку
+            print("Index delete error:", e)
 
     def list_indexes(self):
         return [i["name"] for i in self.pc.list_indexes()]
+
+    def get_book_metadata(self, book_id: str) -> MetaBook:
+        """
+        Собирает метаданные по загруженной книге (namespace = f"book_{book_id}").
+
+        Возвращаемая структура (пример):
+        {
+        "book_id": "...",
+        "namespace": "book_...",
+        "index_name": "books-shared-index-dense-384",
+        "vector_count": 123,
+        "sample_metadata": { "doc_id": "...", "doc_title": "...", "chunk_index": 0, "heading_chain": "H1" },
+        "raw_stats": {...},   # если удалось получить
+        "error": None
+        }
+        """
+        namespace = f"book_{book_id}"
+        index_name = self.create_index_name(book_id)
+        out: MetaBook = {
+            "book_id": book_id,
+            "namespace": namespace,
+            "index_name": index_name,
+            "vector_count": 0,
+            "sample_metadata": None,
+            "raw_stats": None,
+            "error": None,
+        }
+
+        info = self._describe_index(index_name)
+        host = info.get("host") or info.get("server", {}).get("host") or index_name
+        if not host:
+            raise RuntimeError(
+                "Unable to determine index host for chosen index: %s" % index_name
+            )
+        self._host = host
+        self.index = self.pc.Index(host=host)
+        self.index_name = index_name
+
+        # 1) Попытка получить статистику индекса (describe_index_stats / describe_index)
+        stats = {}
+        try:
+            # несколько вариантов вызова для совместимости с разными SDK-версиями
+            try:
+                stats = self.pc.describe_index_stats(index_name=index_name)
+            except TypeError:
+                # некоторые версии ожидают positional arg
+                try:
+                    stats = self.pc.describe_index_stats(index_name)
+                except Exception:
+                    stats = {}
+            except Exception:
+                # fallback: попытка вызвать на уровне index client (если он инициализирован)
+                if self.index:
+                    try:
+                        stats = self.index.describe_index_stats()
+                    except Exception:
+                        stats = {}
+                else:
+                    stats = {}
+        except Exception:
+            stats = {}
+
+        out["raw_stats"] = stats
+
+        # Извлечём количество векторов для нашего namespace
+        try:
+            # в разных версиях структура stats разная
+            if isinstance(stats, dict):
+                # часто stats["namespaces"] -> { namespace: {"vector_count": N, ...}, ...}
+                ns_map = stats.get("namespaces") or stats.get("namespaces", {})
+                if isinstance(ns_map, dict) and namespace in ns_map:
+                    ns_info = ns_map[namespace]
+                    out["vector_count"] = int(
+                        ns_info.get("vector_count") or ns_info.get("count") or 0
+                    )
+                else:
+                    # некоторые SDK возвращают {"namespace": {...}} for a single ns, or root-level counts
+                    # try direct keys
+                    if namespace in stats:
+                        try:
+                            out["vector_count"] = int(
+                                stats[namespace].get("vector_count", 0)
+                            )
+                        except Exception:
+                            out["vector_count"] = 0
+                    else:
+                        # fallback: try to read total vector count for index and hope namespace==index
+                        total = (
+                            stats.get("total_vector_count")
+                            or stats.get("total_count")
+                            or stats.get("vector_count")
+                        )
+                        if total:
+                            out["vector_count"] = int(total)
+        except Exception:
+            out["vector_count"] = out.get("vector_count", 0)
+
+        # 2) Попробуем получить пример метаданных одного элемента из namespace.
+        # Для этого нам нужен векторный размер (dimension), чтобы сделать dummy-query (нулевой вектор).
+        try:
+            info = self._describe_index(index_name) or {}
+            dim = info.get("dimension") or info.get("index_config", {}).get("dimension")
+            if dim:
+                dim = int(dim)
+                # construct zero vector (cosine/dot metrics tolerate zeros for sampling; if index empty, query вернёт пусто)
+                zero_vec = [0.0] * dim
+                # безопасно запрашиваем top_k=1 в конкретном namespace
+                try:
+                    # new SDK может возвращать dict или объект; мы обрабатываем оба варианта ниже
+                    resp = self.index.query(
+                        vector=zero_vec,
+                        top_k=1,
+                        namespace=namespace,
+                        include_metadata=True,
+                    )
+                    # нормализуем ответ в dict-like
+                    matches = None
+                    if isinstance(resp, dict):
+                        matches = resp.get("matches") or resp.get("results") or []
+                    else:
+                        # объект-ответ: попробуем атрибуты
+                        matches = (
+                            getattr(resp, "matches", None)
+                            or getattr(resp, "results", None)
+                            or []
+                        )
+                    if matches:
+                        first = matches[0]
+                        # metadata может быть в first["metadata"] или first.metadata
+                        meta = None
+                        if isinstance(first, dict):
+                            meta = first.get("metadata") or first.get("meta") or {}
+                        else:
+                            meta = (
+                                getattr(first, "metadata", None)
+                                or getattr(first, "meta", None)
+                                or {}
+                            )
+                        out["sample_metadata"] = meta or {}
+                except Exception:
+                    # если query падает (например, index не инициализирован) — просто игнорируем
+                    out["sample_metadata"] = None
+            else:
+                out["sample_metadata"] = None
+        except Exception:
+            out["sample_metadata"] = None
+
+        # 3) Заполняем index_name в результате (может измениться, если клиент переключал имя)
+        out["index_name"] = index_name
+
+        out["raw_stats"] = to_primitive(out.get("raw_stats"))
+        out["sample_metadata"] = to_primitive(out.get("sample_metadata"))
+
+        return out
