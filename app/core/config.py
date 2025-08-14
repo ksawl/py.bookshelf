@@ -30,3 +30,8 @@ EMBEDDING_MODEL = os.getenv(
 )  # change if needed
 
 ALLOWED_EXTENSIONS = {"docx", "odt", "pdf", "txt"}
+
+OLLAMA_API_BASE_URL = "http://localhost:11434"
+LLM_MODEL = "llama2"
+MAX_CONTEXT_CHARS = 4000
+TOP_K = 5

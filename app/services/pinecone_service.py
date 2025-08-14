@@ -9,7 +9,8 @@ Public methods:
 - query(...)
 """
 
-from typing import List, Optional, Tuple
+import asyncio
+from typing import List, Optional, Tuple, Dict, Any
 from pinecone import Pinecone, ServerlessSpec
 
 from app.utils.book_processor import to_primitive
@@ -72,6 +73,63 @@ class PineconeService:
 
         # ServerlessSpec expects cloud like 'aws' or 'gcp' and region like 'us-west1'
         return ServerlessSpec(cloud=cloud, region=region)
+
+    async def query_top_k(
+        self,
+        book_id: str,
+        vector: List[float],
+        top_k: int = settings.TOP_K,
+        filter: Optional[Dict[str, Any]] = None,
+        include_metadata: bool = True,
+        include_values: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Выполняет запрос в указанном индексе Pinecone и возвращает результат запроса.
+
+        Args:
+            vector: вектор запроса (List[float])
+            top_k: сколько матчей вернуть
+            index_name: имя индекса в Pinecone; если None, используется default_index_name из конструктора
+            namespace: namespace index (если используете)
+            filter: metadata filter (Pinecone filter dict) - опционально
+            include_metadata: вернуть metadata
+            include_values: вернуть сами векторные значения
+
+        Returns:
+            dict: оригинальный ответ от Pinecone Index.query
+        """
+        if not book_id:
+            raise ValueError(
+                "book_id must be provided either to query_top_k or as default in constructor"
+            )
+        idx_name = self.create_index_name(book_id) or self.default_index_name
+        namespace = f"book_{book_id}"
+
+        try:
+            # Подготовим sync вызов (создаём Index динамически, чтобы поддерживать разные индексы на книгу)
+            def _sync_query():
+                index = self.pc.Index(idx_name)
+                return index.query(
+                    vector=vector,
+                    top_k=top_k,
+                    namespace=namespace,
+                    filter=filter,
+                    include_metadata=include_metadata,
+                    include_values=include_values,
+                )
+
+            resp = await asyncio.to_thread(_sync_query)
+            # Обычно resp — dict (или object с аттрибутами). Приводим к dict для стабильности.
+            if hasattr(resp, "to_dict"):
+                return resp.to_dict()
+            if isinstance(resp, dict):
+                return resp
+            # fallback: попытка сериализовать
+            return {"matches": list(getattr(resp, "matches", []))}
+
+        except Exception as e:
+            print("Pinecone query error: %s", e)
+            raise
 
     def ensure_index_for_dimension(
         self, desired_dim: int, target: int = settings.PINECONE_INDEX

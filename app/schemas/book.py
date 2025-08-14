@@ -3,8 +3,8 @@ from typing import List, Optional, Any, Dict
 
 
 class Answer(BaseModel):
-    answer: str
-    sources: List[str]  # ссылки на источники
+    text: str
+    sources: List[Dict[str, Any]]
 
 
 class MetaBook(BaseModel):

@@ -1,11 +1,14 @@
 import uuid
 import asyncio
 import os
-from typing import Optional
-from app.schemas.book import Answer, MetaBook
+from typing import Optional, List, Dict, Any
+from langchain_ollama.llms import OllamaLLM
 
+
+from app.schemas.book import Answer, MetaBook
 from app.services.pinecone_service import PineconeService
 from app.core.jobs import JobStore
+from app.core import config as settings
 from app.utils.book_processor import (
     detect_extension,
     convert_docx_to_markdown,
@@ -21,6 +24,15 @@ class BookshelfService:
     def __init__(self):
         self.pinecone = PineconeService()
         self.jobs = JobStore()  # simple in-memory; swap for DB in prod
+
+        self.ollama_base_url = settings.OLLAMA_API_BASE_URL
+        self.llm_model = settings.LLM_MODEL
+        self.max_context_chars = settings.MAX_CONTEXT_CHARS
+        self.top_k = settings.TOP_K
+
+        # Инициализация LangChain Ollama (sync). Поскольку LangChain-объекты, как правило,
+        # синхронные, вызовы LLM будут выполняться в threadpool (asyncio.to_thread).
+        self.llm = OllamaLLM(model=self.llm_model, base_url=self.ollama_base_url)
 
     def enqueue_file(
         self, file_path: str, filename: str, callback_url: Optional[str] = None
@@ -42,7 +54,6 @@ class BookshelfService:
 
     async def get_book(self, book_id: str) -> MetaBook:
         book = self.pinecone.get_book_metadata(book_id)
-
         return book
 
     async def get_all_books(self) -> list[str]:
@@ -50,8 +61,97 @@ class BookshelfService:
         return indexes
 
     async def ask_book_question(self, book_id: str, question: str) -> Answer:
-        # return Answer(answer=answer, sources=sources)
-        pass
+        """
+        Основной метод: получает эмбеддинг вопроса, делает запрос в Pinecone,
+        формирует контекст и вызывает LLM для генерации ответа.
+        """
+        try:
+            # 1) получаем эмбеддинг вопроса
+            # Ожидается, что get_embeddings — асинхронная функция, возвращающая List[List[float]]
+            q_emb_list = await get_embeddings([question])
+            if not q_emb_list:
+                raise RuntimeError("get_embeddings вернул пустой результат")
+            q_emb = q_emb_list[0]
+            # 2) запрос в Pinecone (через вынесенный метод)
+            # Каждый индекс соответствует одной книге и формируется из book_id.
+
+            resp = await self.pinecone.query_top_k(
+                book_id,
+                vector=q_emb,
+                top_k=self.top_k,
+                filter=None,
+                include_metadata=True,
+                include_values=False,
+            )
+
+            matches = resp.get("matches", []) if isinstance(resp, dict) else []
+
+            # 3) нормализуем и собираем чанки
+            context_chunks: List[Dict[str, Any]] = []
+            for m in matches:
+                mid = m.get("id")
+                score = m.get("score") or m.get("distance")
+                meta = m.get("metadata") or {}
+                text = (
+                    meta.get("text")
+                    or meta.get("content")
+                    or meta.get("chunk_text")
+                    or ""
+                )
+                context_chunks.append(
+                    {"id": mid, "score": score, "text": text, "metadata": meta}
+                )
+
+            # 4) формируем контекст для LLM
+            parts = []
+            for c in context_chunks:
+                src = (
+                    c["metadata"].get("source")
+                    or c["metadata"].get("page")
+                    or f"chunk:{c['id']}"
+                )
+                header = f"[source: {src} | id: {c['id']} | score: {c['score']}]"
+                parts.append(f"{header}\n{c['text']}")
+
+            combined_context = "\n\n---\n\n".join(parts)
+            if len(combined_context) > self.max_context_chars:
+                combined_context = (
+                    combined_context[: self.max_context_chars] + "\n\n...[truncated]..."
+                )
+
+            # 5) формируем промпт
+            prompt = (
+                "Ты — помощник. Отвечай используя ТОЛЬКО предоставленные фрагменты и только по содержанию фрагментов, не добавляя ничего лишнего. Если информации недостаточно, "
+                "честно скажи об этом.\n\n"
+                f"Контекст:\n{combined_context}\n\n"
+                f"Вопрос: {question}\n\n"
+                "Ответ (коротко):"
+            )
+
+            # 6) вызов LLM — LangChain Ollama sync объект в threadpool
+            def _sync_llm_call(p: str) -> str:
+                try:
+                    # invoke — рекомендованный интерфейс
+                    return str(self.llm.invoke(p))
+                except Exception as exc:
+                    print("LLM sync call failed: %s", exc)
+                    raise
+
+            llm_resp_text = await asyncio.to_thread(_sync_llm_call, prompt)
+
+            # 7) собираем ответ
+            answer = Answer(
+                text=llm_resp_text,
+                sources=[
+                    {"id": c["id"], "score": c["score"], "metadata": c["metadata"]}
+                    for c in context_chunks
+                ],
+            )
+            return answer
+
+        except Exception as e:
+            print("Ошибка в ask_book_question: %s", e)
+            return Answer(text=f"Ошибка при обработке запроса: {e}", sources=[])
 
     async def remove_book(self, book_id: str):
         index_name = self.pinecone.create_index_name(book_id)
