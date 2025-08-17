@@ -1,28 +1,45 @@
-import os
-from dotenv import load_dotenv
+# app/core/config.py
+from functools import lru_cache
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Optional, Set
 
-if not os.getenv("PINECONE_API_KEY"):
-    load_dotenv()
 
-ALLOWED_EXTENSIONS = {"docx", "odt", "pdf", "txt"}
+class Settings(BaseSettings):
+    # файловые/общие
+    ALLOWED_EXTENSIONS: Set[str] = {"docx", "odt", "pdf", "txt"}
 
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-PINECONE_ENV = os.getenv("PINECONE_ENV")
-PINECONE_INDEX = os.getenv("PINECONE_INDEX")
-PINECONE_SERVERLESS_CLOUD = os.getenv("PINECONE_SERVERLESS_CLOUD")
-PINECONE_SERVERLESS_REGION = os.getenv("PINECONE_SERVERLESS_REGION")
+    # Pinecone
+    PINECONE_API_KEY: Optional[str] = None
+    PINECONE_ENV: Optional[str] = "us-east-1"
+    PINECONE_INDEX: Optional[str] = None
+    PINECONE_SERVERLESS_CLOUD: Optional[str] = "aws"
+    PINECONE_SERVERLESS_REGION: Optional[str] = "us-east-1"
 
-CHUNK_TOKENS = int(os.getenv("CHUNK_TOKENS"))
-OVERLAP_PCT = float(os.getenv("OVERLAP_PCT"))
-BATCH_SIZE = int(os.getenv("BATCH_SIZE"))
-ENCODING_NAME = os.getenv("ENCODING_NAME")
+    # параметры обработки
+    CHUNK_TOKENS: int = 500
+    OVERLAP_PCT: float = 0.2
+    BATCH_SIZE: int = 100
+    ENCODING_NAME: Optional[str] = None
 
-EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME")
+    # модели / ключи
+    EMBED_MODEL_NAME: Optional[str] = None
+    OPENAI_API_KEY: Optional[str] = None
+    EMBEDDING_MODEL: Optional[str] = None
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
+    # ollama / llm
+    OLLAMA_API_BASE_URL: Optional[str] = None
+    LLM_MODEL: Optional[str] = None
+    MAX_CONTEXT_CHARS: int = 4000
+    TOP_K: int = 5
 
-OLLAMA_API_BASE_URL = os.getenv("OLLAMA_API_BASE_URL")
-LLM_MODEL = os.getenv("LLM_MODEL")
-MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS"))
-TOP_K = int(os.getenv("TOP_K"))
+    # pydantic-settings uses model_config / SettingsConfigDict
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+
+
+@lru_cache()
+def get_settings() -> Settings:
+    """
+    Кешированная фабрика. FastAPI будет вызывать get_settings() через Depends,
+    а lru_cache гарантирует единоразовое создание Settings на процесс.
+    """
+    return Settings()

@@ -1,3 +1,4 @@
+# app/services/pinecone_service.py
 """
 Thin wrapper around modern pinecone client to centralize index management and upserts.
 This implementation uses the new `Pinecone` class (pinecone>=1.x) and ensures that
@@ -10,17 +11,20 @@ Public methods:
 """
 
 import asyncio
-from typing import List, Optional, Tuple, Dict, Any
 from pinecone import Pinecone, ServerlessSpec
+from typing import List, Optional, Tuple, Dict, Any
 
-from app.utils.book_processor import to_primitive
-from app.core import config as settings
+from app.utils.book_processor import BookProcessor
 from app.schemas.book import MetaBook
+from app.core.config import Settings
 
 
 class PineconeService:
-    def __init__(self, default_dim: int = 384):
+    def __init__(self, settings: Settings, default_dim: int = 384):
+        self._settings = settings
+        self.bp = BookProcessor(settings=settings)
         self.index_name = settings.PINECONE_INDEX
+
         api_key = settings.PINECONE_API_KEY
         env = settings.PINECONE_ENV
 
@@ -48,7 +52,7 @@ class PineconeService:
         Попробовать распарсить PINECONE_ENV, либо взять отдельные переменные.
         Ожидаемые форматы PINECONE_ENV: "us-west1-gcp", "us-east1-aws" и т.п.
         """
-        env = settings.PINECONE_ENV or ""
+        env = self._settings.PINECONE_ENV or ""
         cloud = None
         region = None
 
@@ -61,8 +65,8 @@ class PineconeService:
                 region = "-".join(parts[:-1]) if len(parts) > 1 else None
 
         # fallback to explicit vars
-        cloud = cloud or settings.PINECONE_SERVERLESS_CLOUD
-        region = region or settings.PINECONE_SERVERLESS_REGION
+        cloud = cloud or self._settings.PINECONE_SERVERLESS_CLOUD
+        region = region or self._settings.PINECONE_SERVERLESS_REGION
 
         if not cloud or not region:
             raise RuntimeError(
@@ -78,7 +82,7 @@ class PineconeService:
         self,
         book_id: str,
         vector: List[float],
-        top_k: int = settings.TOP_K,
+        top_k: Optional[int] = None,
         filter: Optional[Dict[str, Any]] = None,
         include_metadata: bool = True,
         include_values: bool = False,
@@ -98,6 +102,9 @@ class PineconeService:
         Returns:
             dict: оригинальный ответ от Pinecone Index.query
         """
+        if not top_k:
+            top_k = self._settings.TOP_K
+
         if not book_id:
             raise ValueError(
                 "book_id must be provided either to query_top_k or as default in constructor"
@@ -132,8 +139,11 @@ class PineconeService:
             raise
 
     def ensure_index_for_dimension(
-        self, desired_dim: int, target: int = settings.PINECONE_INDEX
+        self, desired_dim: int, target: Optional[int] = None
     ) -> str:
+        if not target:
+            target = self._settings.PINECONE_INDEX
+
         existing = [i["name"] for i in self.pc.list_indexes()]
 
         def _create_index(name, dim):
@@ -361,7 +371,7 @@ class PineconeService:
         # 3) Заполняем index_name в результате (может измениться, если клиент переключал имя)
         out["index_name"] = index_name
 
-        out["raw_stats"] = to_primitive(out.get("raw_stats"))
-        out["sample_metadata"] = to_primitive(out.get("sample_metadata"))
+        out["raw_stats"] = self.bp.to_primitive(out.get("raw_stats"))
+        out["sample_metadata"] = self.bp.to_primitive(out.get("sample_metadata"))
 
         return out

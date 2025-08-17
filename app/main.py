@@ -1,3 +1,5 @@
+import os
+import tempfile
 from fastapi import (
     FastAPI,
     UploadFile,
@@ -7,12 +9,10 @@ from fastapi import (
     BackgroundTasks,
     Depends,
 )
-from fastapi.responses import JSONResponse
-from functools import lru_cache
-from typing import Annotated
 from pathlib import Path
-import tempfile
-import os
+from typing import Annotated
+from functools import lru_cache
+from fastapi.responses import JSONResponse
 
 from app.services.bookshelf_service import BookshelfService
 from app.schemas.book import Answer, MetaBook
@@ -22,13 +22,21 @@ app = FastAPI(title="Bookshelf API")
 
 
 @lru_cache()
-def get_bookshelf_singleton() -> BookshelfService:
-    return BookshelfService()
+def _create_bookshelf_singleton() -> BookshelfService:
+    s: settings.Settings = settings.get_settings()
+    return BookshelfService(settings=s)
+
+
+def with_bookshelf(
+    s: settings.Settings = Depends(settings.get_settings),
+) -> BookshelfService:
+    # Depends(settings.get_settings) — позволяет тестам переопределять настройки
+    return _create_bookshelf_singleton()
 
 
 @app.get("/bookshelf", summary="Get Indexed Books")
 async def get_books_list(
-    service: BookshelfService = Depends(get_bookshelf_singleton),
+    service: BookshelfService = Depends(with_bookshelf),
 ) -> list[str]:
     return await service.get_all_books()
 
@@ -36,7 +44,7 @@ async def get_books_list(
 @app.get("/bookshelf/{book_id}", summary="Get Meta from Book")
 async def get_book_info(
     book_id: str,
-    service: BookshelfService = Depends(get_bookshelf_singleton),
+    service: BookshelfService = Depends(with_bookshelf),
 ) -> MetaBook:
     book = await service.get_book(book_id)
 
@@ -49,7 +57,8 @@ async def get_book_info(
 async def upload_book(
     background: BackgroundTasks,
     file: UploadFile = File(...),
-    service: BookshelfService = Depends(get_bookshelf_singleton),
+    service: BookshelfService = Depends(with_bookshelf),
+    cfg: settings.Settings = Depends(settings.get_settings),
 ) -> str:
     # basic validation
     if not file:
@@ -57,7 +66,7 @@ async def upload_book(
 
     filename = file.filename
     ext = Path(filename).suffix.lower().lstrip(".")
-    if ext not in settings.ALLOWED_EXTENSIONS:
+    if ext not in cfg.ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
 
     # save to tmp
@@ -81,7 +90,7 @@ async def upload_book(
 @app.get("/bookshelf/{book_id}/status")
 def get_status(
     book_id: str,
-    service: BookshelfService = Depends(get_bookshelf_singleton),
+    service: BookshelfService = Depends(with_bookshelf),
 ):
     status = service.get_job_status(book_id)
     if not status:
@@ -93,7 +102,7 @@ def get_status(
 async def ask_question(
     book_id: str,
     q: Annotated[str, Query(max_length=300)],
-    service: BookshelfService = Depends(get_bookshelf_singleton),
+    service: BookshelfService = Depends(with_bookshelf),
 ) -> Answer:
     return await service.ask_book_question(book_id, q)
 
@@ -102,7 +111,7 @@ async def ask_question(
 async def delete_book(
     book_id: str,
     background_tasks: BackgroundTasks,
-    service: BookshelfService = Depends(get_bookshelf_singleton),
+    service: BookshelfService = Depends(with_bookshelf),
 ):
     background_tasks.add_task(service.remove_book, book_id)
     return {"status": "accepted", "book_id": book_id}

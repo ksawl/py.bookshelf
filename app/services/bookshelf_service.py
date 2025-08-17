@@ -1,3 +1,4 @@
+# app/services/bookshelf_service.py
 import uuid
 import asyncio
 import os
@@ -8,21 +9,14 @@ from langchain_ollama.llms import OllamaLLM
 from app.schemas.book import Answer, MetaBook
 from app.services.pinecone_service import PineconeService
 from app.core.jobs import JobStore
-from app.core import config as settings
-from app.utils.book_processor import (
-    detect_extension,
-    convert_docx_to_markdown,
-    extract_headings_from_docx,
-    extract_text_from_pdf,
-    split_into_token_chunks,
-    get_embeddings,
-    sanitize_metadata,
-)
+from app.core.config import Settings
+from app.utils.book_processor import BookProcessor
 
 
 class BookshelfService:
-    def __init__(self):
-        self.pinecone = PineconeService()
+    def __init__(self, settings: Settings):
+        self.pinecone = PineconeService(settings=settings)
+        self.bp = BookProcessor(settings=settings)
         self.jobs = JobStore()  # simple in-memory; swap for DB in prod
 
         self.ollama_base_url = settings.OLLAMA_API_BASE_URL
@@ -68,7 +62,7 @@ class BookshelfService:
         try:
             # 1) получаем эмбеддинг вопроса
             # Ожидается, что get_embeddings — асинхронная функция, возвращающая List[List[float]]
-            q_emb_list = await get_embeddings([question])
+            q_emb_list = await self.bp.get_embeddings([question])
             if not q_emb_list:
                 raise RuntimeError("get_embeddings вернул пустой результат")
             q_emb = q_emb_list[0]
@@ -151,7 +145,9 @@ class BookshelfService:
 
         except Exception as e:
             print("Ошибка в ask_book_question: %s", e)
-            return Answer(text=f"Ошибка при обработке запроса: {e}", sources=[])
+            return Answer(
+                text=f"Ошибка при обработке запроса: {e}", sources=[], prompt=prompt
+            )
 
     async def remove_book(self, book_id: str):
         index_name = self.pinecone.create_index_name(book_id)
@@ -170,17 +166,17 @@ class BookshelfService:
         try:
             with open(path, "rb") as f:
                 raw = f.read()
-            ext = detect_extension(filename, raw)
+            ext = self.bp.detect_extension(filename, raw)
 
             # Extract text + structural info
             heading_points = []
             pages = None
             if ext == "docx":
-                markdown = convert_docx_to_markdown(path)
-                full_text, heading_points = extract_headings_from_docx(path)
+                markdown = self.bp.convert_docx_to_markdown(path)
+                full_text, heading_points = self.bp.extract_headings_from_docx(path)
                 text_for_chunk = markdown or full_text
             elif ext == "pdf":
-                full_text, pages = extract_text_from_pdf(path)
+                full_text, pages = self.bp.extract_text_from_pdf(path)
                 text_for_chunk = full_text
                 heading_points = []
             else:
@@ -191,7 +187,7 @@ class BookshelfService:
                     text_for_chunk = raw.decode("utf-8", errors="ignore")
 
             # split into chunks (token-based)
-            chunks = split_into_token_chunks(text_for_chunk)
+            chunks = self.bp.split_into_token_chunks(text_for_chunk)
             total = len(chunks)
             self.jobs.update(book_id, {"total_chunks": total})
 
@@ -221,11 +217,11 @@ class BookshelfService:
                         "chunk_index": c["chunk_index"],
                         "heading_chain": heading_chain,
                     }
-                    metas.append(sanitize_metadata(raw_meta))
+                    metas.append(self.bp.sanitize_metadata(raw_meta))
                     ids.append(f"{book_id}-{c['chunk_index']}")
 
                 # get embeddings (await)
-                embeddings = await get_embeddings(texts_for_emb)
+                embeddings = await self.bp.get_embeddings(texts_for_emb)
 
                 # On first batch, ensure index exists and is dense with proper dimension
                 if not first_batch_done:

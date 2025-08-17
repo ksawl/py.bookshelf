@@ -5,6 +5,7 @@ from typing import List, Optional, Any, Dict
 class Answer(BaseModel):
     text: str
     sources: List[Dict[str, Any]]
+    prompt: str
 
 
 class MetaBook(BaseModel):
