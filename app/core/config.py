@@ -5,6 +5,9 @@ from typing import Optional, Set
 
 
 class Settings(BaseSettings):
+    # Database
+    DATABASE_URL: str = "sqlite:///./bookshelf.db"
+    
     # файловые/общие
     ALLOWED_EXTENSIONS: Set[str] = {"docx", "odt", "pdf", "txt"}
 

@@ -8,16 +8,17 @@ from langchain_ollama.llms import OllamaLLM
 
 from app.schemas.book import Answer, MetaBook
 from app.services.pinecone_service import PineconeService
-from app.core.jobs import JobStore
+from app.services.database_service import DatabaseService
+from app.schemas.job import JobInfo
 from app.core.config import Settings
 from app.utils.book_processor import BookProcessor
 
 
 class BookshelfService:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, database: DatabaseService):
         self.pinecone = PineconeService(settings=settings)
         self.bp = BookProcessor(settings=settings)
-        self.jobs = JobStore()  # simple in-memory; swap for DB in prod
+        self.database = database
 
         self.ollama_base_url = settings.OLLAMA_API_BASE_URL
         self.llm_model = settings.LLM_MODEL
@@ -28,23 +29,23 @@ class BookshelfService:
         # синхронные, вызовы LLM будут выполняться в threadpool (asyncio.to_thread).
         self.llm = OllamaLLM(model=self.llm_model, base_url=self.ollama_base_url)
 
-    def enqueue_file(
+    async def enqueue_file(
         self, file_path: str, filename: str, callback_url: Optional[str] = None
     ) -> str:
         """Register job and return book_id immediately"""
         book_id = str(uuid.uuid4())
         namespace = f"book_{book_id}"
-        info = {
+        info: JobInfo = {
             "filename": filename,
             "path": file_path,
             "namespace": namespace,
             "callback_url": callback_url,
         }
-        self.jobs.create(book_id, info)
+        await self.database.create_job(book_id, info)
         return book_id
 
-    def get_job_status(self, book_id: str):
-        return self.jobs.get(book_id)
+    async def get_job_status(self, book_id: str):
+        return await self.database.get_job(book_id)
 
     async def get_book(self, book_id: str) -> MetaBook:
         book = self.pinecone.get_book_metadata(book_id)
@@ -140,6 +141,7 @@ class BookshelfService:
                     {"id": c["id"], "score": c["score"], "metadata": c["metadata"]}
                     for c in context_chunks
                 ],
+                prompt=prompt,
             )
             return answer
 
@@ -155,11 +157,11 @@ class BookshelfService:
         # return self.pinecone.delete_index_safe(index_name)
 
     async def process_file(self, book_id: str):
-        job = self.jobs.get(book_id)
+        job = await self.database.get_job(book_id)
         if not job:
             return
 
-        self.jobs.update(book_id, {"status": "processing"})
+        await self.database.update_job(book_id, {"status": "processing"})
         path = job.get("path")
         filename = job.get("filename")
 
@@ -189,7 +191,7 @@ class BookshelfService:
             # split into chunks (token-based)
             chunks = self.bp.split_into_token_chunks(text_for_chunk)
             total = len(chunks)
-            self.jobs.update(book_id, {"total_chunks": total})
+            await self.database.update_job(book_id, {"total_chunks": total})
 
             # We'll upsert in batches. We need to ensure a dense Pinecone index exists
             # Determine index only after we compute the first embeddings batch (to know dimension).
@@ -234,7 +236,7 @@ class BookshelfService:
                         emb_dim, index
                     )
                     # store chosen index name in job for debugging/inspection
-                    self.jobs.update(book_id, {"index_name": chosen_index})
+                    await self.database.update_job(book_id, {"index_name": chosen_index})
                     first_batch_done = True
 
                 # prepare upsert tuples
@@ -246,7 +248,7 @@ class BookshelfService:
                 self.pinecone.upsert(upsert_items, namespace=namespace)
 
                 # update progress
-                self.jobs.increment_processed(book_id, n=len(window))
+                await self.database.increment_processed(book_id, n=len(window))
 
                 # optional: notify callback_url if provided (best-effort, non-blocking)
                 cb = job.get("callback_url")
@@ -254,9 +256,9 @@ class BookshelfService:
                     # fire-and-forget
                     asyncio.create_task(self._notify_callback(cb, book_id))
 
-            self.jobs.finish(book_id, success=True)
+            await self.database.finish_job(book_id, success=True)
         except Exception as e:
-            self.jobs.finish(book_id, success=False, error=str(e))
+            await self.database.finish_job(book_id, success=False, error=str(e))
         finally:
             try:
                 os.remove(path)
@@ -269,7 +271,7 @@ class BookshelfService:
         """
         import httpx
 
-        payload = self.jobs.get(job_id)
+        payload = await self.database.get_job(job_id)
         try:
             async with httpx.AsyncClient() as client:
                 await client.post(callback_url, json=payload, timeout=5.0)

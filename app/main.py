@@ -1,5 +1,6 @@
 import os
 import tempfile
+from contextlib import asynccontextmanager
 from fastapi import (
     FastAPI,
     UploadFile,
@@ -15,20 +16,44 @@ from functools import lru_cache
 from fastapi.responses import JSONResponse
 
 from app.services.bookshelf_service import BookshelfService
+from app.services.database_service import DatabaseService
 from app.schemas.book import Answer, MetaBook
 from app.core import config as settings
 
-app = FastAPI(title="Bookshelf API")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Application lifespan - startup and shutdown"""
+    # Startup
+    db = _create_database_singleton()
+    await db.init_db()
+    yield
+    # Shutdown (if needed)
+    # await db.close_connections() - if needed
+
+
+app = FastAPI(title="Bookshelf API", lifespan=lifespan)
+
+
+@lru_cache()
+def _get_settings() -> settings.Settings:
+    """Cached settings singleton"""
+    return settings.get_settings()
+
+
+@lru_cache()
+def _create_database_singleton() -> DatabaseService:
+    return DatabaseService(settings=_get_settings())
 
 
 @lru_cache()
 def _create_bookshelf_singleton() -> BookshelfService:
-    s: settings.Settings = settings.get_settings()
-    return BookshelfService(settings=s)
+    db = _create_database_singleton()
+    return BookshelfService(settings=_get_settings(), database=db)
 
 
 def with_bookshelf(
-    s: settings.Settings = Depends(settings.get_settings),
+    _: settings.Settings = Depends(settings.get_settings),
 ) -> BookshelfService:
     # Depends(settings.get_settings) — позволяет тестам переопределять настройки
     return _create_bookshelf_singleton()
@@ -77,7 +102,7 @@ async def upload_book(
         f.write(contents)
 
     # enqueue in service: returns book_id
-    book_id = service.enqueue_file(tmp_path, filename)
+    book_id = await service.enqueue_file(tmp_path, filename)
 
     # schedule background processing
     background.add_task(service.process_file, book_id)
@@ -88,11 +113,11 @@ async def upload_book(
 
 
 @app.get("/bookshelf/{book_id}/status")
-def get_status(
+async def get_status(
     book_id: str,
     service: BookshelfService = Depends(with_bookshelf),
 ):
-    status = service.get_job_status(book_id)
+    status = await service.get_job_status(book_id)
     if not status:
         raise HTTPException(status_code=404, detail="book_id not found")
     return status
