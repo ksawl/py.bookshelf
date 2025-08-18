@@ -25,8 +25,7 @@ class BookshelfService:
         self.max_context_chars = settings.MAX_CONTEXT_CHARS
         self.top_k = settings.TOP_K
 
-        # Инициализация LangChain Ollama (sync). Поскольку LangChain-объекты, как правило,
-        # синхронные, вызовы LLM будут выполняться в threadpool (asyncio.to_thread).
+        # Инициализация LangChain Ollama для асинхронной работы
         self.llm = OllamaLLM(model=self.llm_model, base_url=self.ollama_base_url)
 
     async def enqueue_file(
@@ -123,16 +122,12 @@ class BookshelfService:
                 "Ответ (коротко):"
             )
 
-            # 6) вызов LLM — LangChain Ollama sync объект в threadpool
-            def _sync_llm_call(p: str) -> str:
-                try:
-                    # invoke — рекомендованный интерфейс
-                    return str(self.llm.invoke(p))
-                except Exception as exc:
-                    print("LLM sync call failed: %s", exc)
-                    raise
-
-            llm_resp_text = await asyncio.to_thread(_sync_llm_call, prompt)
+            # 6) асинхронный вызов LLM через ainvoke
+            try:
+                llm_resp_text = await self.llm.ainvoke(prompt)
+            except Exception as exc:
+                print("LLM async call failed: %s", exc)
+                raise
 
             # 7) собираем ответ
             answer = Answer(
