@@ -94,7 +94,12 @@ class BookProcessor:
         encoding_name: Optional[str] = None,
     ) -> List[dict]:
         """
-        Split text into chunks of ~chunk_size tokens with overlap.
+        Split text into chunks of ~chunk_size tokens with proper overlap.
+        
+        Overlap calculation:
+        - overlap_pct = 0.2 (20%) means each chunk overlaps with previous by 20% of chunk_tokens
+        - step_size = chunk_tokens * (1 - overlap_pct) = chunk_tokens * 0.8
+        - This ensures 20% overlap between consecutive chunks
         """
         if not chunk_tokens:
             chunk_tokens = self._settings.CHUNK_TOKENS
@@ -107,25 +112,41 @@ class BookProcessor:
 
         enc = tiktoken.get_encoding(encoding_name)
         tokens = enc.encode(text)
-        overlap = int(chunk_tokens * overlap_pct)
+        
+        # Calculate step size for proper overlap
+        # For 20% overlap: step = chunk_tokens * 0.8
+        step_size = int(chunk_tokens * (1 - overlap_pct))
+        
+        # Ensure step_size is at least 1 to avoid infinite loop
+        step_size = max(1, step_size)
 
         chunks = []
         start = 0
         idx = 0
+        
         while start < len(tokens):
-            end = start + chunk_tokens
+            end = min(start + chunk_tokens, len(tokens))
+            
+            # Skip chunks that are too small (less than 10% of target size)
+            if end - start < chunk_tokens * 0.1 and idx > 0:
+                break
+                
             slice_tokens = tokens[start:end]
             chunk_text = enc.decode(slice_tokens)
+            
             chunks.append(
                 {
                     "chunk_index": idx,
                     "text": chunk_text,
                     "token_start": start,
-                    "token_end": min(end, len(tokens)),
+                    "token_end": end,
+                    "actual_tokens": len(slice_tokens),
                 }
             )
+            
             idx += 1
-            start += chunk_tokens - overlap
+            start += step_size
+            
         return chunks
 
     async def get_embeddings_openai(self, texts: List[str]) -> List[List[float]]:
