@@ -217,10 +217,10 @@ class PineconeService:
         )
 
     def delete_index(self, name: str):
+        """Синхронное удаление индекса - не требует async"""
         try:
             self.pc.delete_index(name)
         except Exception as e:
-            # логируем ошибку
             print("Index delete error:", e)
 
     async def list_indexes(self):

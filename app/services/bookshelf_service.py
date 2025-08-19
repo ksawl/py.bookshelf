@@ -17,18 +17,16 @@ from app.utils.book_processor import BookProcessor
 
 class BookshelfService:
     def __init__(self, settings: Settings, database: DatabaseService):
-        self.pinecone = PineconeService(settings=settings)
-        self.bp = BookProcessor(settings=settings)  # Оставляем для совместимости с ask_book_question
-        self.document_processor = DocumentProcessingService(settings=settings)
+        self.settings = settings
         self.database = database
+        
+        # Создаем сервисы для каждого запроса (stateless)
+        self.pinecone = PineconeService(settings=settings)
+        self.bp = BookProcessor(settings=settings)  
+        self.document_processor = DocumentProcessingService(settings=settings)
 
-        self.ollama_base_url = settings.OLLAMA_API_BASE_URL
-        self.llm_model = settings.LLM_MODEL
-        self.max_context_chars = settings.MAX_CONTEXT_CHARS
-        self.top_k = settings.TOP_K
-
-        # Инициализация LangChain Ollama для асинхронной работы
-        self.llm = OllamaLLM(model=self.llm_model, base_url=self.ollama_base_url)
+        # Инициализация LangChain Ollama
+        self.llm = OllamaLLM(model=settings.LLM_MODEL, base_url=settings.OLLAMA_API_BASE_URL)
 
     async def enqueue_file(
         self, file_path: str, filename: str, callback_url: Optional[str] = None
@@ -54,14 +52,14 @@ class BookshelfService:
 
     async def get_all_books(self) -> list[str]:
         """Get all books with synchronization between Pinecone and database"""
-        # Получаем индексы из Pinecone
-        pinecone_indexes = await self.pinecone.list_indexes()
-        
-        # Получаем все задания из БД со статусом "done"
-        all_jobs = await self.database.get_all_jobs()
-        completed_jobs = [job for job in all_jobs if job.get("status") == "done"]
+        # Получаем индексы из Pinecone и задания из БД параллельно
+        pinecone_indexes, all_jobs = await asyncio.gather(
+            self.pinecone.list_indexes(),
+            self.database.get_all_jobs()
+        )
         
         # Извлекаем book_id из завершенных заданий
+        completed_jobs = [job for job in all_jobs if job.get("status") == "done"]
         db_book_ids = set(job["job_id"] for job in completed_jobs)
         
         # Извлекаем book_id из индексов Pinecone (формат: book-{book_id})
@@ -71,118 +69,79 @@ class BookshelfService:
                 book_id = index_name.replace("book-", "", 1)
                 pinecone_book_ids.add(book_id)
         
-        # Находим несоответствия и синхронизируем
+        # Синхронизируем несоответствия
+        await self._sync_pinecone_and_db(pinecone_book_ids, db_book_ids)
+        
+        # Возвращаем актуальный список book_id
+        return list(pinecone_book_ids - (db_book_ids - pinecone_book_ids))
+
+    async def _sync_pinecone_and_db(self, pinecone_book_ids: set, db_book_ids: set):
+        """Синхронизация между Pinecone и БД"""
         # 1. Индексы в Pinecone без записей в БД - создаем записи в БД
         orphaned_pinecone = pinecone_book_ids - db_book_ids
-        for book_id in orphaned_pinecone:
-            # Получаем метаданные из Pinecone для создания записи в БД
-            try:
-                book_metadata = await self.pinecone.get_book_metadata(book_id)
-                namespace = f"book_{book_id}"
-                index_name = self.pinecone.create_index_name(book_id)
-                
-                # Создаем запись в БД как завершенное задание
-                job_info = {
-                    "filename": book_metadata.get("sample_metadata", {}).get("doc_title", f"book_{book_id}"),
-                    "path": None,  # файл уже обработан
-                    "namespace": namespace,
-                    "index_name": index_name,
-                    "status": "done",
-                    "total_chunks": book_metadata.get("vector_count", 0),
-                    "processed_chunks": book_metadata.get("vector_count", 0),
-                    "progress": 100
-                }
-                await self.database.create_job(book_id, job_info)
-            except Exception as e:
-                print(f"Ошибка при создании записи БД для book_id {book_id}: {e}")
+        if orphaned_pinecone:
+            sync_tasks = []
+            for book_id in orphaned_pinecone:
+                sync_tasks.append(self._create_db_record_from_pinecone(book_id))
+            await asyncio.gather(*sync_tasks, return_exceptions=True)
         
         # 2. Записи в БД без индексов в Pinecone - удаляем из БД
         orphaned_db = db_book_ids - pinecone_book_ids
-        for book_id in orphaned_db:
-            await self.database.delete_job(book_id)
-        
-        # Возвращаем обновленный список book_id после синхронизации
-        # Теперь все book_id из Pinecone должны иметь соответствующие записи в БД
-        final_book_ids = pinecone_book_ids - orphaned_db  # исключаем удаленные из БД
-        return list(final_book_ids)
+        if orphaned_db:
+            delete_tasks = []
+            for book_id in orphaned_db:
+                delete_tasks.append(self.database.delete_job(book_id))
+            await asyncio.gather(*delete_tasks, return_exceptions=True)
+
+    async def _create_db_record_from_pinecone(self, book_id: str):
+        """Создает запись в БД на основе метаданных из Pinecone"""
+        try:
+            book_metadata = await self.pinecone.get_book_metadata(book_id)
+            namespace = f"book_{book_id}"
+            index_name = self.pinecone.create_index_name(book_id)
+            
+            job_info = {
+                "filename": book_metadata.get("sample_metadata", {}).get("doc_title", f"book_{book_id}"),
+                "path": None,  # файл уже обработан
+                "namespace": namespace,
+                "index_name": index_name,
+                "status": "done",
+                "total_chunks": book_metadata.get("vector_count", 0),
+                "processed_chunks": book_metadata.get("vector_count", 0),
+                "progress": 100
+            }
+            await self.database.create_job(book_id, job_info)
+        except Exception as e:
+            print(f"Ошибка при создании записи БД для book_id {book_id}: {e}")
 
     async def ask_book_question(self, book_id: str, question: str) -> Answer:
-        """
-        Основной метод: получает эмбеддинг вопроса, делает запрос в Pinecone,
-        формирует контекст и вызывает LLM для генерации ответа.
-        """
+        """Получение ответа от LLM на основе контекста из книги"""
         try:
-            # 1) получаем эмбеддинг вопроса
-            # Ожидается, что get_embeddings — асинхронная функция, возвращающая List[List[float]]
+            # 1) Получаем эмбеддинг и делаем запрос в Pinecone параллельно
             q_emb_list = await self.bp.get_embeddings([question])
             if not q_emb_list:
                 raise RuntimeError("get_embeddings вернул пустой результат")
+            
             q_emb = q_emb_list[0]
-            # 2) запрос в Pinecone (через вынесенный метод)
-            # Каждый индекс соответствует одной книге и формируется из book_id.
-
             resp = await self.pinecone.query_top_k(
                 book_id,
                 vector=q_emb,
-                top_k=self.top_k,
-                filter=None,
+                top_k=self.settings.TOP_K,
                 include_metadata=True,
                 include_values=False,
             )
 
+            # 2) Обрабатываем результаты поиска
             matches = resp.get("matches", []) if isinstance(resp, dict) else []
+            context_chunks = self._process_search_matches(matches)
 
-            # 3) нормализуем и собираем чанки
-            context_chunks: List[Dict[str, Any]] = []
-            for m in matches:
-                mid = m.get("id")
-                score = m.get("score") or m.get("distance")
-                meta = m.get("metadata") or {}
-                text = (
-                    meta.get("text")
-                    or meta.get("content")
-                    or meta.get("chunk_text")
-                    or ""
-                )
-                context_chunks.append(
-                    {"id": mid, "score": score, "text": text, "metadata": meta}
-                )
+            # 3) Формируем контекст и вызываем LLM
+            combined_context = self._build_context(context_chunks)
+            prompt = self._build_prompt(combined_context, question)
+            
+            llm_resp_text = await self.llm.ainvoke(prompt)
 
-            # 4) формируем контекст для LLM
-            parts = []
-            for c in context_chunks:
-                src = (
-                    c["metadata"].get("source")
-                    or c["metadata"].get("page")
-                    or f"chunk:{c['id']}"
-                )
-                header = f"[source: {src} | id: {c['id']} | score: {c['score']}]"
-                parts.append(f"{header}\n{c['text']}")
-
-            combined_context = "\n\n---\n\n".join(parts)
-            if len(combined_context) > self.max_context_chars:
-                combined_context = (
-                    combined_context[: self.max_context_chars] + "\n\n...[truncated]..."
-                )
-
-            # 5) формируем промпт
-            prompt = (
-                "Ты — помощник. Отвечай используя ТОЛЬКО предоставленные фрагменты и только по содержанию фрагментов, не добавляя ничего лишнего. Если информации недостаточно, "
-                "честно скажи об этом.\n\n"
-                f"Контекст:\n{combined_context}\n\n"
-                f"Вопрос: {question}\n\n"
-                "Ответ (коротко):"
-            )
-
-            # 6) асинхронный вызов LLM через ainvoke
-            try:
-                llm_resp_text = await self.llm.ainvoke(prompt)
-            except Exception as exc:
-                print("LLM async call failed: %s", exc)
-                raise
-
-            # 7) собираем ответ
-            answer = Answer(
+            return Answer(
                 text=llm_resp_text,
                 sources=[
                     {"id": c["id"], "score": c["score"], "metadata": c["metadata"]}
@@ -190,13 +149,62 @@ class BookshelfService:
                 ],
                 prompt=prompt,
             )
-            return answer
 
         except Exception as e:
-            print("Ошибка в ask_book_question: %s", e)
+            print(f"Ошибка в ask_book_question: {e}")
             return Answer(
-                text=f"Ошибка при обработке запроса: {e}", sources=[], prompt=prompt
+                text=f"Ошибка при обработке запроса: {e}", 
+                sources=[], 
+                prompt=""
             )
+
+    def _process_search_matches(self, matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Обрабатывает результаты поиска из Pinecone"""
+        context_chunks = []
+        for m in matches:
+            mid = m.get("id")
+            score = m.get("score") or m.get("distance")
+            meta = m.get("metadata") or {}
+            text = meta.get("text") or meta.get("content") or meta.get("chunk_text") or ""
+            
+            context_chunks.append({
+                "id": mid, 
+                "score": score, 
+                "text": text, 
+                "metadata": meta
+            })
+        return context_chunks
+
+    def _build_context(self, context_chunks: List[Dict[str, Any]]) -> str:
+        """Формирует контекст для LLM из найденных чанков"""
+        parts = []
+        for c in context_chunks:
+            src = (
+                c["metadata"].get("source") or 
+                c["metadata"].get("page") or 
+                f"chunk:{c['id']}"
+            )
+            header = f"[source: {src} | id: {c['id']} | score: {c['score']}]"
+            parts.append(f"{header}\n{c['text']}")
+
+        combined_context = "\n\n---\n\n".join(parts)
+        if len(combined_context) > self.settings.MAX_CONTEXT_CHARS:
+            combined_context = (
+                combined_context[:self.settings.MAX_CONTEXT_CHARS] + 
+                "\n\n...[truncated]..."
+            )
+        return combined_context
+
+    def _build_prompt(self, context: str, question: str) -> str:
+        """Формирует промпт для LLM"""
+        return (
+            "Ты — помощник. Отвечай используя ТОЛЬКО предоставленные фрагменты и только "
+            "по содержанию фрагментов, не добавляя ничего лишнего. Если информации "
+            "недостаточно, честно скажи об этом.\n\n"
+            f"Контекст:\n{context}\n\n"
+            f"Вопрос: {question}\n\n"
+            "Ответ (коротко):"
+        )
 
     async def remove_book(self, book_id: str) -> dict:
         """Remove book from Pinecone index and delete corresponding DB record"""
@@ -217,91 +225,3 @@ class BookshelfService:
             
         except Exception as e:
             return {"success": False, "message": f"Error removing book {book_id}: {str(e)}"}
-
-    async def process_file(self, book_id: str):
-        """
-        Обработка файла с использованием DocumentProcessingService.
-        Значительно упрощенная версия - вся сложная логика вынесена в отдельный сервис.
-        """
-        job = await self.database.get_job(book_id)
-        if not job:
-            return
-
-        await self.database.update_job(book_id, {"status": "processing"})
-        path = job.get("path")
-        filename = job.get("filename")
-        namespace = job.get("namespace")
-
-        try:
-            # 1. Обрабатываем документ через специализированный сервис
-            processing_result = await self.document_processor.process_document(
-                book_id, path, filename
-            )
-            
-            chunks_with_embeddings = processing_result["chunks"]
-            embedding_dimension = processing_result["embedding_dimension"]
-            total_chunks = processing_result["total_chunks"]
-            
-            await self.database.update_job(book_id, {
-                "total_chunks": total_chunks,
-                "extra": {"document_metadata": processing_result["document_metadata"]}
-            })
-
-            # 2. Убеждаемся, что индекс существует с правильной размерностью
-            if embedding_dimension == 0:
-                raise RuntimeError("Не удалось определить размерность эмбеддингов")
-            
-            index_name = self.pinecone.create_index_name(book_id)
-            chosen_index = await self.pinecone.ensure_index_for_dimension(
-                embedding_dimension, index_name
-            )
-            await self.database.update_job(book_id, {"index_name": chosen_index})
-
-            # 3. Загружаем данные в Pinecone батчами
-            BATCH_SIZE = 64
-            processed_count = 0
-            
-            for i in range(0, len(chunks_with_embeddings), BATCH_SIZE):
-                batch_chunks = chunks_with_embeddings[i:i + BATCH_SIZE]
-                
-                # Подготавливаем данные для upsert
-                upsert_data = self.document_processor.prepare_for_pinecone_upsert(
-                    batch_chunks
-                )
-                
-                # Загружаем в Pinecone
-                self.pinecone.upsert(upsert_data, namespace=namespace)
-                
-                # Обновляем прогресс
-                processed_count += len(batch_chunks)
-                await self.database.increment_processed(book_id, n=len(batch_chunks))
-                
-                # Уведомляем callback (если есть)
-                callback_url = job.get("callback_url")
-                if callback_url:
-                    asyncio.create_task(self._notify_callback(callback_url, book_id))
-
-            await self.database.finish_job(book_id, success=True)
-            
-        except Exception as e:
-            await self.database.finish_job(book_id, success=False, error=str(e))
-        finally:
-            # Удаляем временный файл
-            try:
-                os.remove(path)
-            except Exception:
-                pass
-
-    async def _notify_callback(self, callback_url: str, job_id: str):
-        """Best-effort notifier. Non-blocking.
-        Keep simple: no retries here; in prod use httpx with retry/backoff.
-        """
-        import httpx
-
-        payload = await self.database.get_job(job_id)
-        try:
-            async with httpx.AsyncClient() as client:
-                await client.post(callback_url, json=payload, timeout=5.0)
-        except Exception:
-            # ignore failures for now
-            pass
