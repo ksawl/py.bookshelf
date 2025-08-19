@@ -8,8 +8,8 @@ from .background_processor import BackgroundProcessor
 
 __all__ = [
     "BookshelfService",
-    "DatabaseService", 
+    "DatabaseService",
     "PineconeService",
     "DocumentProcessingService",
-    "BackgroundProcessor"
+    "BackgroundProcessor",
 ]

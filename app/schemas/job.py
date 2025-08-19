@@ -10,6 +10,7 @@ JobStatus = Literal["queued", "processing", "done", "error", "cancelled"]
 
 class JobInfo(TypedDict, total=False):
     """TypedDict for job information - matches SQLAlchemy Job model"""
+
     # Identifiers / timestamps
     job_id: str
     created_at: datetime

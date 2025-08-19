@@ -43,7 +43,7 @@ class PineconeService(LoggerMixin):
         if self._pc is None:
             self._pc = Pinecone(
                 api_key=self._settings.PINECONE_API_KEY,
-                environment=self._settings.PINECONE_ENV
+                environment=self._settings.PINECONE_ENV,
             )
             self.logger.info("Pinecone client initialized")
         return self._pc
@@ -64,7 +64,9 @@ class PineconeService(LoggerMixin):
             self._index_cache[index_name] = index
             yield index
         except Exception as e:
-            self.logger.error("Failed to get index", index_name=index_name, error=str(e))
+            self.logger.error(
+                "Failed to get index", index_name=index_name, error=str(e)
+            )
             raise PineconeServiceError(f"Failed to get index {index_name}: {e}") from e
 
     async def _describe_index(self, name: str) -> Dict[str, Any]:
@@ -72,7 +74,9 @@ class PineconeService(LoggerMixin):
         try:
             return await asyncio.to_thread(self.pc.describe_index, name)
         except Exception as e:
-            self.logger.warning("Failed to describe index", index_name=name, error=str(e))
+            self.logger.warning(
+                "Failed to describe index", index_name=name, error=str(e)
+            )
             return {}
 
     def _spec_from_env(self) -> ServerlessSpec:
@@ -130,7 +134,7 @@ class PineconeService(LoggerMixin):
         """
         if not book_id:
             raise PineconeServiceError("book_id is required for query")
-        
+
         if not vector:
             raise PineconeServiceError("vector is required for query")
 
@@ -141,9 +145,13 @@ class PineconeService(LoggerMixin):
         namespace = f"book_{book_id}"
 
         try:
-            self.logger.debug("Executing Pinecone query", 
-                            book_id=book_id, index_name=idx_name, 
-                            top_k=top_k, vector_dim=len(vector))
+            self.logger.debug(
+                "Executing Pinecone query",
+                book_id=book_id,
+                index_name=idx_name,
+                top_k=top_k,
+                vector_dim=len(vector),
+            )
 
             async with self.get_index(idx_name) as index:
                 resp = await asyncio.to_thread(
@@ -164,13 +172,20 @@ class PineconeService(LoggerMixin):
                 else:
                     result = {"matches": list(getattr(resp, "matches", []))}
 
-                self.logger.debug("Query completed successfully", 
-                                book_id=book_id, matches_count=len(result.get("matches", [])))
+                self.logger.debug(
+                    "Query completed successfully",
+                    book_id=book_id,
+                    matches_count=len(result.get("matches", [])),
+                )
                 return result
 
         except Exception as e:
-            self.logger.error("Pinecone query failed", 
-                            book_id=book_id, index_name=idx_name, error=str(e))
+            self.logger.error(
+                "Pinecone query failed",
+                book_id=book_id,
+                index_name=idx_name,
+                error=str(e),
+            )
             raise PineconeServiceError(f"Query failed for book {book_id}: {e}") from e
 
     async def ensure_index_for_dimension(
@@ -181,15 +196,17 @@ class PineconeService(LoggerMixin):
 
         def _sync_operations():
             existing = [i["name"] for i in self.pc.list_indexes()]
-            
+
             def _create_index(name, dim):
                 # build ServerlessSpec from env (or raise)
                 spec = self._spec_from_env()
                 # create index with spec
-                self.pc.create_index(name=name, dimension=dim, metric="cosine", spec=spec)
-            
+                self.pc.create_index(
+                    name=name, dimension=dim, metric="cosine", spec=spec
+                )
+
             return existing, _create_index
-        
+
         existing, _create_index = await asyncio.to_thread(_sync_operations)
 
         if target in existing:
@@ -198,19 +215,26 @@ class PineconeService(LoggerMixin):
             if not dim:
                 new_name = f"{self.index_name}-dense-{desired_dim}"
                 if new_name not in existing:
-                    self.logger.info("Creating new index", index_name=new_name, dimension=desired_dim)
+                    self.logger.info(
+                        "Creating new index", index_name=new_name, dimension=desired_dim
+                    )
                     await asyncio.to_thread(_create_index, new_name, desired_dim)
                 target = new_name
             elif int(dim) != int(desired_dim):
                 new_name = f"{self.index_name}-dense-{desired_dim}"
                 if new_name not in existing:
-                    self.logger.info("Creating new index for different dimension", 
-                                   index_name=new_name, dimension=desired_dim)
+                    self.logger.info(
+                        "Creating new index for different dimension",
+                        index_name=new_name,
+                        dimension=desired_dim,
+                    )
                     await asyncio.to_thread(_create_index, new_name, desired_dim)
                 target = new_name
         else:
             # Create the requested index with ServerlessSpec
-            self.logger.info("Creating new index", index_name=target, dimension=desired_dim)
+            self.logger.info(
+                "Creating new index", index_name=target, dimension=desired_dim
+            )
             await asyncio.to_thread(_create_index, target, desired_dim)
 
         self.logger.info("Index ensured", index_name=target, dimension=desired_dim)
@@ -227,23 +251,27 @@ class PineconeService(LoggerMixin):
             raise PineconeServiceError("No vectors provided for upsert")
 
         try:
-            self.logger.debug("Upserting vectors", 
-                            index_name=index_name, count=len(vectors), namespace=namespace)
+            self.logger.debug(
+                "Upserting vectors",
+                index_name=index_name,
+                count=len(vectors),
+                namespace=namespace,
+            )
 
             async with self.get_index(index_name) as index:
                 result = await asyncio.to_thread(
-                    index.upsert,
-                    vectors=vectors,
-                    namespace=namespace
+                    index.upsert, vectors=vectors, namespace=namespace
                 )
-                
-                self.logger.debug("Upsert completed", 
-                                index_name=index_name, count=len(vectors))
+
+                self.logger.debug(
+                    "Upsert completed", index_name=index_name, count=len(vectors)
+                )
                 return result
 
         except Exception as e:
-            self.logger.error("Upsert failed", 
-                            index_name=index_name, count=len(vectors), error=str(e))
+            self.logger.error(
+                "Upsert failed", index_name=index_name, count=len(vectors), error=str(e)
+            )
             raise PineconeServiceError(f"Upsert failed: {e}") from e
 
     async def delete_index(self, name: str) -> None:
@@ -251,11 +279,11 @@ class PineconeService(LoggerMixin):
         try:
             self.logger.info("Deleting index", index_name=name)
             await asyncio.to_thread(self.pc.delete_index, name)
-            
+
             # Remove from cache if present
             if name in self._index_cache:
                 del self._index_cache[name]
-                
+
             self.logger.info("Index deleted successfully", index_name=name)
         except Exception as e:
             self.logger.error("Failed to delete index", index_name=name, error=str(e))
@@ -264,9 +292,10 @@ class PineconeService(LoggerMixin):
     async def list_indexes(self) -> List[str]:
         """List all available Pinecone indexes."""
         try:
+
             def _sync_list():
                 return [i["name"] for i in self.pc.list_indexes()]
-            
+
             indexes = await asyncio.to_thread(_sync_list)
             self.logger.debug("Listed indexes", count=len(indexes))
             return indexes
@@ -308,6 +337,7 @@ class PineconeService(LoggerMixin):
         # Get index statistics with multiple compatibility approaches
         stats = {}
         try:
+
             def _get_stats():
                 # Try different call variants for SDK version compatibility
                 try:
@@ -325,7 +355,7 @@ class PineconeService(LoggerMixin):
                         return index.describe_index_stats()
                     except Exception:
                         return {}
-            
+
             stats = await asyncio.to_thread(_get_stats)
         except Exception:
             stats = {}
@@ -429,46 +459,53 @@ class PineconeService(LoggerMixin):
         """
         if _seen is None:
             _seen = set()
-        
+
         # Check for circular references
         obj_id = id(obj)
         if obj_id in _seen:
             return f"<circular reference to {type(obj).__name__}>"
-        
+
         if obj is None or isinstance(obj, (str, int, float, bool)):
             return obj
-        
+
         # Handle problematic types that don't serialize
-        if hasattr(obj, '__class__') and obj.__class__.__name__ == 'Logger':
+        if hasattr(obj, "__class__") and obj.__class__.__name__ == "Logger":
             return f"<Logger: {getattr(obj, 'name', 'unknown')}>"
-        
+
         # Handle other problematic types
-        if hasattr(obj, '__module__') and obj.__module__ in ['logging', 'threading', 'asyncio']:
+        if hasattr(obj, "__module__") and obj.__module__ in [
+            "logging",
+            "threading",
+            "asyncio",
+        ]:
             return f"<{type(obj).__name__}>"
-        
+
         # Add object to visited set
         _seen.add(obj_id)
-        
+
         try:
             if isinstance(obj, dict):
                 result = {k: self._to_primitive(v, _seen) for k, v in obj.items()}
             elif isinstance(obj, (list, tuple)):
                 result = [self._to_primitive(v, _seen) for v in obj]
-            elif hasattr(obj, 'to_dict'):
+            elif hasattr(obj, "to_dict"):
                 try:
                     result = self._to_primitive(obj.to_dict(), _seen)
                 except Exception:
                     result = str(obj)
-            elif hasattr(obj, '__dict__'):
+            elif hasattr(obj, "__dict__"):
                 try:
                     # Safe access to __dict__ with problematic attribute filtering
                     obj_dict = {}
                     for key, value in obj.__dict__.items():
                         # Skip private attributes and underscore attributes
-                        if key.startswith('_'):
+                        if key.startswith("_"):
                             continue
                         # Skip types that definitely don't serialize
-                        if isinstance(value, (type, type(lambda: None))) or (hasattr(value, '__class__') and value.__class__.__name__ == 'Logger'):
+                        if isinstance(value, (type, type(lambda: None))) or (
+                            hasattr(value, "__class__")
+                            and value.__class__.__name__ == "Logger"
+                        ):
                             continue
                         obj_dict[key] = value
                     result = self._to_primitive(obj_dict, _seen)
@@ -481,5 +518,5 @@ class PineconeService(LoggerMixin):
         finally:
             # Remove object from visited set on exit
             _seen.discard(obj_id)
-        
+
         return result

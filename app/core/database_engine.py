@@ -11,21 +11,21 @@ def get_database_engine(database_url: str):
     # Convert sqlite:/// to sqlite+aiosqlite:///
     if database_url.startswith("sqlite:///"):
         database_url = database_url.replace("sqlite:///", "sqlite+aiosqlite:///")
-    
+
     # SQLite specific configuration
     connect_args = {}
     if "sqlite" in database_url:
         connect_args = {
             "check_same_thread": False,
         }
-    
+
     engine = create_async_engine(
         database_url,
         connect_args=connect_args,
         poolclass=StaticPool if "sqlite" in database_url else None,
         echo=False,  # Set to True for SQL debugging
     )
-    
+
     return engine
 
 

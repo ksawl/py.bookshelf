@@ -19,8 +19,9 @@ logger = get_logger(__name__)
 
 _database_service: Optional[DatabaseService] = None
 
+
 def get_database_service(
-    settings: Annotated[Settings, Depends(get_settings)]
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> DatabaseService:
     """Get database service dependency."""
     global _database_service
@@ -31,7 +32,7 @@ def get_database_service(
 
 
 def get_pinecone_service(
-    settings: Annotated[Settings, Depends(get_settings)]
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> PineconeService:
     """Get Pinecone service dependency."""
     logger.debug("Creating Pinecone service")
@@ -40,7 +41,7 @@ def get_pinecone_service(
 
 def get_bookshelf_service(
     settings: Annotated[Settings, Depends(get_settings)],
-    database: Annotated[DatabaseService, Depends(get_database_service)]
+    database: Annotated[DatabaseService, Depends(get_database_service)],
 ) -> BookshelfService:
     """Get bookshelf service dependency."""
     logger.debug("Creating bookshelf service")
@@ -49,7 +50,7 @@ def get_bookshelf_service(
 
 def get_background_processor(
     settings: Annotated[Settings, Depends(get_settings)],
-    database: Annotated[DatabaseService, Depends(get_database_service)]
+    database: Annotated[DatabaseService, Depends(get_database_service)],
 ) -> BackgroundProcessor:
     """Get background processor dependency."""
     logger.debug("Creating background processor")
