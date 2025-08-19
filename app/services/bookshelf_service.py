@@ -53,8 +53,58 @@ class BookshelfService:
         return book
 
     async def get_all_books(self) -> list[str]:
-        indexes = await self.pinecone.list_indexes()
-        return indexes
+        """Get all books with synchronization between Pinecone and database"""
+        # Получаем индексы из Pinecone
+        pinecone_indexes = await self.pinecone.list_indexes()
+        
+        # Получаем все задания из БД со статусом "done"
+        all_jobs = await self.database.get_all_jobs()
+        completed_jobs = [job for job in all_jobs if job.get("status") == "done"]
+        
+        # Извлекаем book_id из завершенных заданий
+        db_book_ids = set(job["job_id"] for job in completed_jobs)
+        
+        # Извлекаем book_id из индексов Pinecone (формат: book-{book_id})
+        pinecone_book_ids = set()
+        for index_name in pinecone_indexes:
+            if index_name.startswith("book-"):
+                book_id = index_name.replace("book-", "", 1)
+                pinecone_book_ids.add(book_id)
+        
+        # Находим несоответствия и синхронизируем
+        # 1. Индексы в Pinecone без записей в БД - создаем записи в БД
+        orphaned_pinecone = pinecone_book_ids - db_book_ids
+        for book_id in orphaned_pinecone:
+            # Получаем метаданные из Pinecone для создания записи в БД
+            try:
+                book_metadata = await self.pinecone.get_book_metadata(book_id)
+                namespace = f"book_{book_id}"
+                index_name = self.pinecone.create_index_name(book_id)
+                
+                # Создаем запись в БД как завершенное задание
+                job_info = {
+                    "filename": book_metadata.get("sample_metadata", {}).get("doc_title", f"book_{book_id}"),
+                    "path": None,  # файл уже обработан
+                    "namespace": namespace,
+                    "index_name": index_name,
+                    "status": "done",
+                    "total_chunks": book_metadata.get("vector_count", 0),
+                    "processed_chunks": book_metadata.get("vector_count", 0),
+                    "progress": 100
+                }
+                await self.database.create_job(book_id, job_info)
+            except Exception as e:
+                print(f"Ошибка при создании записи БД для book_id {book_id}: {e}")
+        
+        # 2. Записи в БД без индексов в Pinecone - удаляем из БД
+        orphaned_db = db_book_ids - pinecone_book_ids
+        for book_id in orphaned_db:
+            await self.database.delete_job(book_id)
+        
+        # Возвращаем обновленный список book_id после синхронизации
+        # Теперь все book_id из Pinecone должны иметь соответствующие записи в БД
+        final_book_ids = pinecone_book_ids - orphaned_db  # исключаем удаленные из БД
+        return list(final_book_ids)
 
     async def ask_book_question(self, book_id: str, question: str) -> Answer:
         """
@@ -148,10 +198,25 @@ class BookshelfService:
                 text=f"Ошибка при обработке запроса: {e}", sources=[], prompt=prompt
             )
 
-    async def remove_book(self, book_id: str):
-        index_name = self.pinecone.create_index_name(book_id)
-        self.pinecone.delete_index(index_name)
-        # return self.pinecone.delete_index_safe(index_name)
+    async def remove_book(self, book_id: str) -> dict:
+        """Remove book from Pinecone index and delete corresponding DB record"""
+        # Проверяем существование книги в БД
+        job = await self.database.get_job(book_id)
+        if not job:
+            return {"success": False, "message": f"Book with id {book_id} not found"}
+        
+        try:
+            # Удаляем индекс из Pinecone
+            index_name = self.pinecone.create_index_name(book_id)
+            self.pinecone.delete_index(index_name)
+            
+            # Удаляем запись из базы данных
+            await self.database.delete_job(book_id)
+            
+            return {"success": True, "message": f"Book {book_id} successfully removed"}
+            
+        except Exception as e:
+            return {"success": False, "message": f"Error removing book {book_id}: {str(e)}"}
 
     async def process_file(self, book_id: str):
         """

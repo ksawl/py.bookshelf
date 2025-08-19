@@ -135,8 +135,14 @@ async def ask_question(
 @app.delete("/bookshelf/{book_id}", summary="Remove Book")
 async def delete_book(
     book_id: str,
-    background_tasks: BackgroundTasks,
     service: BookshelfService = Depends(with_bookshelf),
 ):
-    background_tasks.add_task(service.remove_book, book_id)
-    return {"status": "accepted", "book_id": book_id}
+    result = await service.remove_book(book_id)
+    
+    if not result["success"]:
+        if "not found" in result["message"]:
+            raise HTTPException(status_code=404, detail=result["message"])
+        else:
+            raise HTTPException(status_code=500, detail=result["message"])
+    
+    return {"status": "success", "message": result["message"], "book_id": book_id}
