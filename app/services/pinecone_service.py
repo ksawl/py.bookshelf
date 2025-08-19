@@ -11,10 +11,10 @@ Public methods:
 """
 
 import asyncio
+import logging
 from pinecone import Pinecone, ServerlessSpec
 from typing import List, Optional, Tuple, Dict, Any
 
-from app.utils.book_processor import BookProcessor
 from app.schemas.book import MetaBook
 from app.core.config import Settings
 
@@ -22,7 +22,6 @@ from app.core.config import Settings
 class PineconeService:
     def __init__(self, settings: Settings, default_dim: int = 384):
         self._settings = settings
-        self.bp = BookProcessor(settings=settings)
         self.index_name = settings.PINECONE_INDEX
 
         api_key = settings.PINECONE_API_KEY
@@ -138,19 +137,24 @@ class PineconeService:
             print("Pinecone query error: %s", e)
             raise
 
-    def ensure_index_for_dimension(
+    async def ensure_index_for_dimension(
         self, desired_dim: int, target: Optional[int] = None
     ) -> str:
         if not target:
             target = self._settings.PINECONE_INDEX
 
-        existing = [i["name"] for i in self.pc.list_indexes()]
-
-        def _create_index(name, dim):
-            # build ServerlessSpec from env (or raise)
-            spec = self._spec_from_env()
-            # create index with spec
-            self.pc.create_index(name=name, dimension=dim, metric="cosine", spec=spec)
+        def _sync_operations():
+            existing = [i["name"] for i in self.pc.list_indexes()]
+            
+            def _create_index(name, dim):
+                # build ServerlessSpec from env (or raise)
+                spec = self._spec_from_env()
+                # create index with spec
+                self.pc.create_index(name=name, dimension=dim, metric="cosine", spec=spec)
+            
+            return existing, _create_index
+        
+        existing, _create_index = await asyncio.to_thread(_sync_operations)
 
         if target in existing:
             info = self._describe_index(target)
@@ -158,16 +162,16 @@ class PineconeService:
             if not dim:
                 new_name = f"{self.index_name}-dense-{desired_dim}"
                 if new_name not in existing:
-                    _create_index(new_name, desired_dim)
+                    await asyncio.to_thread(_create_index, new_name, desired_dim)
                 target = new_name
             elif int(dim) != int(desired_dim):
                 new_name = f"{self.index_name}-dense-{desired_dim}"
                 if new_name not in existing:
-                    _create_index(new_name, desired_dim)
+                    await asyncio.to_thread(_create_index, new_name, desired_dim)
                 target = new_name
         else:
             # create the requested index with ServerlessSpec
-            _create_index(target, desired_dim)
+            await asyncio.to_thread(_create_index, target, desired_dim)
 
         # describe chosen index and init Index client as before
         info = self._describe_index(target)
@@ -219,10 +223,12 @@ class PineconeService:
             # логируем ошибку
             print("Index delete error:", e)
 
-    def list_indexes(self):
-        return [i["name"] for i in self.pc.list_indexes()]
+    async def list_indexes(self):
+        def _sync_list():
+            return [i["name"] for i in self.pc.list_indexes()]
+        return await asyncio.to_thread(_sync_list)
 
-    def get_book_metadata(self, book_id: str) -> MetaBook:
+    async def get_book_metadata(self, book_id: str) -> MetaBook:
         """
         Собирает метаданные по загруженной книге (namespace = f"book_{book_id}").
 
@@ -249,39 +255,45 @@ class PineconeService:
             "error": None,
         }
 
-        info = self._describe_index(index_name)
-        host = info.get("host") or info.get("server", {}).get("host") or index_name
-        if not host:
-            raise RuntimeError(
-                "Unable to determine index host for chosen index: %s" % index_name
-            )
-        self._host = host
-        self.index = self.pc.Index(host=host)
-        self.index_name = index_name
+        # Обернем синхронные операции в отдельную функцию
+        def _sync_setup_and_stats():
+            info = self._describe_index(index_name)
+            host = info.get("host") or info.get("server", {}).get("host") or index_name
+            if not host:
+                raise RuntimeError(
+                    "Unable to determine index host for chosen index: %s" % index_name
+                )
+            self._host = host
+            self.index = self.pc.Index(host=host)
+            self.index_name = index_name
 
-        # 1) Попытка получить статистику индекса (describe_index_stats / describe_index)
-        stats = {}
-        try:
-            # несколько вариантов вызова для совместимости с разными SDK-версиями
+            # 1) Попытка получить статистику индекса (describe_index_stats / describe_index)
+            stats = {}
             try:
-                stats = self.pc.describe_index_stats(index_name=index_name)
-            except TypeError:
-                # некоторые версии ожидают positional arg
+                # несколько вариантов вызова для совместимости с разными SDK-версиями
                 try:
-                    stats = self.pc.describe_index_stats(index_name)
-                except Exception:
-                    stats = {}
-            except Exception:
-                # fallback: попытка вызвать на уровне index client (если он инициализирован)
-                if self.index:
+                    stats = self.pc.describe_index_stats(index_name=index_name)
+                except TypeError:
+                    # некоторые версии ожидают positional arg
                     try:
-                        stats = self.index.describe_index_stats()
+                        stats = self.pc.describe_index_stats(index_name)
                     except Exception:
                         stats = {}
-                else:
-                    stats = {}
-        except Exception:
-            stats = {}
+                except Exception:
+                    # fallback: попытка вызвать на уровне index client (если он инициализирован)
+                    if self.index:
+                        try:
+                            stats = self.index.describe_index_stats()
+                        except Exception:
+                            stats = {}
+                    else:
+                        stats = {}
+            except Exception:
+                stats = {}
+            return stats
+
+        # Выполняем синхронные операции в отдельном потоке
+        stats = await asyncio.to_thread(_sync_setup_and_stats)
 
         out["raw_stats"] = stats
 
@@ -329,13 +341,16 @@ class PineconeService:
                 zero_vec = [0.0] * dim
                 # безопасно запрашиваем top_k=1 в конкретном namespace
                 try:
-                    # new SDK может возвращать dict или объект; мы обрабатываем оба варианта ниже
-                    resp = self.index.query(
-                        vector=zero_vec,
-                        top_k=1,
-                        namespace=namespace,
-                        include_metadata=True,
-                    )
+                    # Обернем query в отдельный поток
+                    def _sync_query():
+                        return self.index.query(
+                            vector=zero_vec,
+                            top_k=1,
+                            namespace=namespace,
+                            include_metadata=True,
+                        )
+                    
+                    resp = await asyncio.to_thread(_sync_query)
                     # нормализуем ответ в dict-like
                     matches = None
                     if isinstance(resp, dict):
@@ -367,11 +382,72 @@ class PineconeService:
                 out["sample_metadata"] = None
         except Exception:
             out["sample_metadata"] = None
-
         # 3) Заполняем index_name в результате (может измениться, если клиент переключал имя)
         out["index_name"] = index_name
 
-        out["raw_stats"] = self.bp.to_primitive(out.get("raw_stats"))
-        out["sample_metadata"] = self.bp.to_primitive(out.get("sample_metadata"))
+        out["raw_stats"] = self._to_primitive(out.get("raw_stats"))
+        out["sample_metadata"] = self._to_primitive(out.get("sample_metadata"))
 
         return out
+
+    def _to_primitive(self, obj: Any, _seen: set = None) -> Any:
+        """
+        Простая функция для сериализации объектов в примитивные типы.
+        Упрощенная версия без зависимости от BookProcessor с защитой от циклических ссылок.
+        """
+        if _seen is None:
+            _seen = set()
+        
+        # Проверяем циклические ссылки
+        obj_id = id(obj)
+        if obj_id in _seen:
+            return f"<circular reference to {type(obj).__name__}>"
+        
+        if obj is None or isinstance(obj, (str, int, float, bool)):
+            return obj
+        
+        # Обработка проблемных типов, которые не сериализуются
+        if isinstance(obj, logging.Logger):
+            return f"<Logger: {obj.name}>"
+        
+        # Обработка других проблемных типов
+        if hasattr(obj, '__module__') and obj.__module__ in ['logging', 'threading', 'asyncio']:
+            return f"<{type(obj).__name__}>"
+        
+        # Добавляем объект в множество посещенных
+        _seen.add(obj_id)
+        
+        try:
+            if isinstance(obj, dict):
+                result = {k: self._to_primitive(v, _seen) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                result = [self._to_primitive(v, _seen) for v in obj]
+            elif hasattr(obj, 'to_dict'):
+                try:
+                    result = self._to_primitive(obj.to_dict(), _seen)
+                except Exception:
+                    result = str(obj)
+            elif hasattr(obj, '__dict__'):
+                try:
+                    # Безопасный доступ к __dict__ с фильтрацией проблемных атрибутов
+                    obj_dict = {}
+                    for key, value in obj.__dict__.items():
+                        # Пропускаем приватные атрибуты и атрибуты с подчеркиванием
+                        if key.startswith('_'):
+                            continue
+                        # Пропускаем типы, которые точно не сериализуются
+                        if isinstance(value, (logging.Logger, type, type(lambda: None))):
+                            continue
+                        obj_dict[key] = value
+                    result = self._to_primitive(obj_dict, _seen)
+                except Exception:
+                    result = str(obj)
+            else:
+                result = str(obj)
+        except Exception:
+            result = str(obj)
+        finally:
+            # Удаляем объект из множества посещенных при выходе
+            _seen.discard(obj_id)
+        
+        return result

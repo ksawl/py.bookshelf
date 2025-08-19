@@ -9,6 +9,7 @@ from langchain_ollama.llms import OllamaLLM
 from app.schemas.book import Answer, MetaBook
 from app.services.pinecone_service import PineconeService
 from app.services.database_service import DatabaseService
+from app.services.document_processing_service import DocumentProcessingService
 from app.schemas.job import JobInfo
 from app.core.config import Settings
 from app.utils.book_processor import BookProcessor
@@ -17,7 +18,8 @@ from app.utils.book_processor import BookProcessor
 class BookshelfService:
     def __init__(self, settings: Settings, database: DatabaseService):
         self.pinecone = PineconeService(settings=settings)
-        self.bp = BookProcessor(settings=settings)
+        self.bp = BookProcessor(settings=settings)  # Оставляем для совместимости с ask_book_question
+        self.document_processor = DocumentProcessingService(settings=settings)
         self.database = database
 
         self.ollama_base_url = settings.OLLAMA_API_BASE_URL
@@ -47,11 +49,11 @@ class BookshelfService:
         return await self.database.get_job(book_id)
 
     async def get_book(self, book_id: str) -> MetaBook:
-        book = self.pinecone.get_book_metadata(book_id)
+        book = await self.pinecone.get_book_metadata(book_id)
         return book
 
     async def get_all_books(self) -> list[str]:
-        indexes = self.pinecone.list_indexes()
+        indexes = await self.pinecone.list_indexes()
         return indexes
 
     async def ask_book_question(self, book_id: str, question: str) -> Answer:
@@ -152,6 +154,10 @@ class BookshelfService:
         # return self.pinecone.delete_index_safe(index_name)
 
     async def process_file(self, book_id: str):
+        """
+        Обработка файла с использованием DocumentProcessingService.
+        Значительно упрощенная версия - вся сложная логика вынесена в отдельный сервис.
+        """
         job = await self.database.get_job(book_id)
         if not job:
             return
@@ -159,102 +165,63 @@ class BookshelfService:
         await self.database.update_job(book_id, {"status": "processing"})
         path = job.get("path")
         filename = job.get("filename")
+        namespace = job.get("namespace")
 
         try:
-            with open(path, "rb") as f:
-                raw = f.read()
-            ext = self.bp.detect_extension(filename, raw)
+            # 1. Обрабатываем документ через специализированный сервис
+            processing_result = await self.document_processor.process_document(
+                book_id, path, filename
+            )
+            
+            chunks_with_embeddings = processing_result["chunks"]
+            embedding_dimension = processing_result["embedding_dimension"]
+            total_chunks = processing_result["total_chunks"]
+            
+            await self.database.update_job(book_id, {
+                "total_chunks": total_chunks,
+                "extra": {"document_metadata": processing_result["document_metadata"]}
+            })
 
-            # Extract text + structural info
-            heading_points = []
-            pages = None
-            if ext == "docx":
-                markdown = self.bp.convert_docx_to_markdown(path)
-                full_text, heading_points = self.bp.extract_headings_from_docx(path)
-                text_for_chunk = markdown or full_text
-            elif ext == "pdf":
-                full_text, pages = self.bp.extract_text_from_pdf(path)
-                text_for_chunk = full_text
-                heading_points = []
-            else:
-                # odt, txt or fallback
-                try:
-                    text_for_chunk = raw.decode("utf-8")
-                except Exception:
-                    text_for_chunk = raw.decode("utf-8", errors="ignore")
+            # 2. Убеждаемся, что индекс существует с правильной размерностью
+            if embedding_dimension == 0:
+                raise RuntimeError("Не удалось определить размерность эмбеддингов")
+            
+            index_name = self.pinecone.create_index_name(book_id)
+            chosen_index = await self.pinecone.ensure_index_for_dimension(
+                embedding_dimension, index_name
+            )
+            await self.database.update_job(book_id, {"index_name": chosen_index})
 
-            # split into chunks (token-based)
-            chunks = self.bp.split_into_token_chunks(text_for_chunk)
-            total = len(chunks)
-            await self.database.update_job(book_id, {"total_chunks": total})
-
-            # We'll upsert in batches. We need to ensure a dense Pinecone index exists
-            # Determine index only after we compute the first embeddings batch (to know dimension).
-            namespace = job.get("namespace")
-            BATCH = 64
-            first_batch_done = False
-
-            for i in range(0, total, BATCH):
-                window = chunks[i : i + BATCH]
-                texts_for_emb = []
-                metas = []
-                ids = []
-                for c in window:
-                    # Assign heading_chain reliably later; for now use nearest if available
-                    heading_chain = None
-                    if heading_points:
-                        heading_chain = heading_points[0][1] if heading_points else None
-
-                    intro = f"{heading_chain}" if heading_chain else ""
-                    chunk_text = intro + c["text"]
-                    texts_for_emb.append(chunk_text)
-                    raw_meta = {
-                        "doc_id": book_id,
-                        "doc_title": filename,
-                        "chunk_index": c["chunk_index"],
-                        "heading_chain": heading_chain,
-                    }
-                    metas.append(self.bp.sanitize_metadata(raw_meta))
-                    ids.append(f"{book_id}-{c['chunk_index']}")
-
-                # get embeddings (await)
-                embeddings = await self.bp.get_embeddings(texts_for_emb)
-
-                # On first batch, ensure index exists and is dense with proper dimension
-                if not first_batch_done:
-                    emb_dim = len(embeddings[0]) if embeddings else None
-                    if emb_dim is None:
-                        raise RuntimeError("Received empty embeddings from provider")
-                    # This will create or switch to a dense-compatible index if needed
-                    index = self.pinecone.create_index_name(book_id)
-                    chosen_index = self.pinecone.ensure_index_for_dimension(
-                        emb_dim, index
-                    )
-                    # store chosen index name in job for debugging/inspection
-                    await self.database.update_job(book_id, {"index_name": chosen_index})
-                    first_batch_done = True
-
-                # prepare upsert tuples
-                upsert_items = [
-                    (ids[j], embeddings[j], metas[j]) for j in range(len(ids))
-                ]
-
-                # perform upsert into the shared index under the job's namespace
-                self.pinecone.upsert(upsert_items, namespace=namespace)
-
-                # update progress
-                await self.database.increment_processed(book_id, n=len(window))
-
-                # optional: notify callback_url if provided (best-effort, non-blocking)
-                cb = job.get("callback_url")
-                if cb:
-                    # fire-and-forget
-                    asyncio.create_task(self._notify_callback(cb, book_id))
+            # 3. Загружаем данные в Pinecone батчами
+            BATCH_SIZE = 64
+            processed_count = 0
+            
+            for i in range(0, len(chunks_with_embeddings), BATCH_SIZE):
+                batch_chunks = chunks_with_embeddings[i:i + BATCH_SIZE]
+                
+                # Подготавливаем данные для upsert
+                upsert_data = self.document_processor.prepare_for_pinecone_upsert(
+                    batch_chunks
+                )
+                
+                # Загружаем в Pinecone
+                self.pinecone.upsert(upsert_data, namespace=namespace)
+                
+                # Обновляем прогресс
+                processed_count += len(batch_chunks)
+                await self.database.increment_processed(book_id, n=len(batch_chunks))
+                
+                # Уведомляем callback (если есть)
+                callback_url = job.get("callback_url")
+                if callback_url:
+                    asyncio.create_task(self._notify_callback(callback_url, book_id))
 
             await self.database.finish_job(book_id, success=True)
+            
         except Exception as e:
             await self.database.finish_job(book_id, success=False, error=str(e))
         finally:
+            # Удаляем временный файл
             try:
                 os.remove(path)
             except Exception:
