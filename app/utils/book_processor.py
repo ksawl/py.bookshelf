@@ -149,24 +149,6 @@ class BookProcessor:
 
         return chunks
 
-    async def get_embeddings_openai(self, texts: List[str]) -> List[List[float]]:
-        if not self._settings.OPENAI_API_KEY:
-            raise RuntimeError("OPENAI_API_KEY not set")
-        if not texts:
-            return []
-
-        _openai_client = OpenAI(api_key=self._settings.OPENAI_API_KEY)
-
-        def _sync_call():
-            resp = _openai_client.embeddings.create(
-                model=self._settings.EMBEDDING_MODEL, input=texts
-            )
-            # resp.data - list of objects; each has .embedding vector
-            return [item.embedding for item in resp.data]
-
-        # Call in separate thread to not block asyncio loop
-        return await asyncio.to_thread(_sync_call)
-
     def _encode_sync(
         self, texts: List[str], batch_size: int = 64, normalize: bool = True
     ) -> List[List[float]]:

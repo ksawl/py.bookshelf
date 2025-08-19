@@ -28,8 +28,6 @@ class Settings(BaseSettings):
 
     # Models / keys
     EMBED_MODEL_NAME: Optional[str] = None
-    OPENAI_API_KEY: Optional[str] = None
-    EMBEDDING_MODEL: Optional[str] = None
 
     # Ollama / LLM
     OLLAMA_API_BASE_URL: Optional[str] = None
