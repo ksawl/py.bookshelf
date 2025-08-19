@@ -77,22 +77,22 @@ class PineconeService(LoggerMixin):
 
     def _spec_from_env(self) -> ServerlessSpec:
         """
-        Попробовать распарсить PINECONE_ENV, либо взять отдельные переменные.
-        Ожидаемые форматы PINECONE_ENV: "us-west1-gcp", "us-east1-aws" и т.п.
+        Parse PINECONE_ENV or use separate environment variables.
+        Expected PINECONE_ENV formats: "us-west1-gcp", "us-east1-aws" etc.
         """
         env = self._settings.PINECONE_ENV or ""
         cloud = None
         region = None
 
-        # try parse env like "us-west1-gcp" -> region=us-west1, cloud=gcp
+        # Parse env like "us-west1-gcp" -> region=us-west1, cloud=gcp
         if "-" in env:
             parts = env.split("-")
-            # naive: last part is cloud (gcp/aws), rest joined is region
+            # Last part is cloud (gcp/aws), rest joined is region
             if parts[-1] in {"gcp", "aws", "azure"}:
                 cloud = parts[-1]
                 region = "-".join(parts[:-1]) if len(parts) > 1 else None
 
-        # fallback to explicit vars
+        # Fallback to explicit variables
         cloud = cloud or self._settings.PINECONE_SERVERLESS_CLOUD
         region = region or self._settings.PINECONE_SERVERLESS_REGION
 
@@ -103,7 +103,6 @@ class PineconeService(LoggerMixin):
                 "set PINECONE_SERVERLESS_CLOUD and PINECONE_SERVERLESS_REGION."
             )
 
-        # ServerlessSpec expects cloud like 'aws' or 'gcp' and region like 'us-west1'
         return ServerlessSpec(cloud=cloud, region=region)
 
     async def query_top_k(
@@ -116,18 +115,18 @@ class PineconeService(LoggerMixin):
         include_values: bool = False,
     ) -> Dict[str, Any]:
         """
-        Выполняет запрос в указанном индексе Pinecone и возвращает результат запроса.
+        Execute query in specified Pinecone index and return query results.
 
         Args:
-            book_id: ID книги для формирования имени индекса и namespace
-            vector: вектор запроса (List[float])
-            top_k: сколько матчей вернуть
-            filter: metadata filter (Pinecone filter dict) - опционально
-            include_metadata: вернуть metadata
-            include_values: вернуть сами векторные значения
+            book_id: Book ID for forming index name and namespace
+            vector: Query vector (List[float])
+            top_k: Number of matches to return
+            filter: Metadata filter (Pinecone filter dict) - optional
+            include_metadata: Return metadata
+            include_values: Return vector values
 
         Returns:
-            dict: оригинальный ответ от Pinecone Index.query
+            dict: Original response from Pinecone Index.query
         """
         if not book_id:
             raise PineconeServiceError("book_id is required for query")
@@ -210,7 +209,7 @@ class PineconeService(LoggerMixin):
                     await asyncio.to_thread(_create_index, new_name, desired_dim)
                 target = new_name
         else:
-            # create the requested index with ServerlessSpec
+            # Create the requested index with ServerlessSpec
             self.logger.info("Creating new index", index_name=target, dimension=desired_dim)
             await asyncio.to_thread(_create_index, target, desired_dim)
 
@@ -277,18 +276,14 @@ class PineconeService(LoggerMixin):
 
     async def get_book_metadata(self, book_id: str) -> MetaBook:
         """
-        Собирает метаданные по загруженной книге (namespace = f"book_{book_id}").
+        Collect metadata for uploaded book (namespace = f"book_{book_id}").
 
-        Возвращаемая структура (пример):
-        {
-        "book_id": "...",
-        "namespace": "book_...",
-        "index_name": "books-shared-index-dense-384",
-        "vector_count": 123,
-        "sample_metadata": { "doc_id": "...", "doc_title": "...", "chunk_index": 0, "heading_chain": "H1" },
-        "raw_stats": {...},   # если удалось получить
-        "error": None
-        }
+        Returns MetaBook with:
+        - book_id, namespace, index_name
+        - vector_count: number of vectors in namespace
+        - sample_metadata: example metadata from one vector
+        - raw_stats: raw Pinecone index stats (if available)
+        - error: error message if any
         """
         namespace = f"book_{book_id}"
         index_name = self.create_index_name(book_id)
@@ -302,7 +297,7 @@ class PineconeService(LoggerMixin):
             "error": None,
         }
 
-        # Async setup and stats
+        # Get index info and stats
         info = await self._describe_index(index_name)
         host = info.get("host") or info.get("server", {}).get("host") or index_name
         if not host:
@@ -310,21 +305,21 @@ class PineconeService(LoggerMixin):
                 "Unable to determine index host for chosen index: %s" % index_name
             )
 
-        # 1) Попытка получить статистику индекса (describe_index_stats / describe_index)
+        # Get index statistics with multiple compatibility approaches
         stats = {}
         try:
             def _get_stats():
-                # несколько вариантов вызова для совместимости с разными SDK-версиями
+                # Try different call variants for SDK version compatibility
                 try:
                     return self.pc.describe_index_stats(index_name=index_name)
                 except TypeError:
-                    # некоторые версии ожидают positional arg
+                    # Some versions expect positional arg
                     try:
                         return self.pc.describe_index_stats(index_name)
                     except Exception:
                         return {}
                 except Exception:
-                    # fallback: попытка вызвать на уровне index client
+                    # Fallback: try calling at index client level
                     try:
                         index = self.pc.Index(index_name)
                         return index.describe_index_stats()
@@ -337,11 +332,11 @@ class PineconeService(LoggerMixin):
 
         out["raw_stats"] = stats
 
-        # Извлечём количество векторов для нашего namespace
+        # Extract vector count for our namespace
         try:
-            # в разных версиях структура stats разная
+            # Stats structure varies between SDK versions
             if isinstance(stats, dict):
-                # часто stats["namespaces"] -> { namespace: {"vector_count": N, ...}, ...}
+                # Common format: stats["namespaces"] -> { namespace: {"vector_count": N, ...}, ...}
                 ns_map = stats.get("namespaces") or stats.get("namespaces", {})
                 if isinstance(ns_map, dict) and namespace in ns_map:
                     ns_info = ns_map[namespace]
@@ -349,8 +344,7 @@ class PineconeService(LoggerMixin):
                         ns_info.get("vector_count") or ns_info.get("count") or 0
                     )
                 else:
-                    # некоторые SDK возвращают {"namespace": {...}} for a single ns, or root-level counts
-                    # try direct keys
+                    # Some SDKs return {"namespace": {...}} for single ns, or root-level counts
                     if namespace in stats:
                         try:
                             out["vector_count"] = int(
@@ -359,7 +353,7 @@ class PineconeService(LoggerMixin):
                         except Exception:
                             out["vector_count"] = 0
                     else:
-                        # fallback: try to read total vector count for index and hope namespace==index
+                        # Fallback: try to read total vector count
                         total = (
                             stats.get("total_vector_count")
                             or stats.get("total_count")
@@ -370,18 +364,17 @@ class PineconeService(LoggerMixin):
         except Exception:
             out["vector_count"] = out.get("vector_count", 0)
 
-        # 2) Попробуем получить пример метаданных одного элемента из namespace.
-        # Для этого нам нужен векторный размер (dimension), чтобы сделать dummy-query (нулевой вектор).
+        # Try to get sample metadata from one element in namespace
+        # Need vector dimension to make dummy query (zero vector)
         try:
             info = await self._describe_index(index_name) or {}
             dim = info.get("dimension") or info.get("index_config", {}).get("dimension")
             if dim:
                 dim = int(dim)
-                # construct zero vector (cosine/dot metrics tolerate zeros for sampling; if index empty, query вернёт пусто)
+                # Construct zero vector (cosine/dot metrics tolerate zeros for sampling)
                 zero_vec = [0.0] * dim
-                # безопасно запрашиваем top_k=1 в конкретном namespace
+                # Safely query top_k=1 in specific namespace
                 try:
-                    # Используем новый async API
                     async with self.get_index(index_name) as index:
                         resp = await asyncio.to_thread(
                             index.query,
@@ -390,12 +383,12 @@ class PineconeService(LoggerMixin):
                             namespace=namespace,
                             include_metadata=True,
                         )
-                    # нормализуем ответ в dict-like
+                    # Normalize response to dict-like
                     matches = None
                     if isinstance(resp, dict):
                         matches = resp.get("matches") or resp.get("results") or []
                     else:
-                        # объект-ответ: попробуем атрибуты
+                        # Object response: try attributes
                         matches = (
                             getattr(resp, "matches", None)
                             or getattr(resp, "results", None)
@@ -403,7 +396,7 @@ class PineconeService(LoggerMixin):
                         )
                     if matches:
                         first = matches[0]
-                        # metadata может быть в first["metadata"] или first.metadata
+                        # Metadata can be in first["metadata"] or first.metadata
                         meta = None
                         if isinstance(first, dict):
                             meta = first.get("metadata") or first.get("meta") or {}
@@ -415,13 +408,13 @@ class PineconeService(LoggerMixin):
                             )
                         out["sample_metadata"] = meta or {}
                 except Exception:
-                    # если query падает (например, index не инициализирован) — просто игнорируем
+                    # If query fails (e.g., index not initialized) - just ignore
                     out["sample_metadata"] = None
             else:
                 out["sample_metadata"] = None
         except Exception:
             out["sample_metadata"] = None
-        # 3) Заполняем index_name в результате (может измениться, если клиент переключал имя)
+        # Fill index_name in result (may have changed if client switched name)
         out["index_name"] = index_name
 
         out["raw_stats"] = self._to_primitive(out.get("raw_stats"))
@@ -431,13 +424,13 @@ class PineconeService(LoggerMixin):
 
     def _to_primitive(self, obj: Any, _seen: set = None) -> Any:
         """
-        Простая функция для сериализации объектов в примитивные типы.
-        Упрощенная версия без зависимости от BookProcessor с защитой от циклических ссылок.
+        Simple function for serializing objects to primitive types.
+        Simplified version without BookProcessor dependency with circular reference protection.
         """
         if _seen is None:
             _seen = set()
         
-        # Проверяем циклические ссылки
+        # Check for circular references
         obj_id = id(obj)
         if obj_id in _seen:
             return f"<circular reference to {type(obj).__name__}>"
@@ -445,15 +438,15 @@ class PineconeService(LoggerMixin):
         if obj is None or isinstance(obj, (str, int, float, bool)):
             return obj
         
-        # Обработка проблемных типов, которые не сериализуются
+        # Handle problematic types that don't serialize
         if hasattr(obj, '__class__') and obj.__class__.__name__ == 'Logger':
             return f"<Logger: {getattr(obj, 'name', 'unknown')}>"
         
-        # Обработка других проблемных типов
+        # Handle other problematic types
         if hasattr(obj, '__module__') and obj.__module__ in ['logging', 'threading', 'asyncio']:
             return f"<{type(obj).__name__}>"
         
-        # Добавляем объект в множество посещенных
+        # Add object to visited set
         _seen.add(obj_id)
         
         try:
@@ -468,13 +461,13 @@ class PineconeService(LoggerMixin):
                     result = str(obj)
             elif hasattr(obj, '__dict__'):
                 try:
-                    # Безопасный доступ к __dict__ с фильтрацией проблемных атрибутов
+                    # Safe access to __dict__ with problematic attribute filtering
                     obj_dict = {}
                     for key, value in obj.__dict__.items():
-                        # Пропускаем приватные атрибуты и атрибуты с подчеркиванием
+                        # Skip private attributes and underscore attributes
                         if key.startswith('_'):
                             continue
-                        # Пропускаем типы, которые точно не сериализуются  
+                        # Skip types that definitely don't serialize
                         if isinstance(value, (type, type(lambda: None))) or (hasattr(value, '__class__') and value.__class__.__name__ == 'Logger'):
                             continue
                         obj_dict[key] = value
@@ -486,7 +479,7 @@ class PineconeService(LoggerMixin):
         except Exception:
             result = str(obj)
         finally:
-            # Удаляем объект из множества посещенных при выходе
+            # Remove object from visited set on exit
             _seen.discard(obj_id)
         
         return result

@@ -1,3 +1,5 @@
+# app/services/__init__.py
+
 from .bookshelf_service import BookshelfService
 from .database_service import DatabaseService
 from .pinecone_service import PineconeService

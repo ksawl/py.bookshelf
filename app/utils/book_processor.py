@@ -161,10 +161,10 @@ class BookProcessor:
             resp = _openai_client.embeddings.create(
                 model=self._settings.EMBEDDING_MODEL, input=texts
             )
-            # resp.data — list of objects; у каждого .embedding — вектор
+            # resp.data - list of objects; each has .embedding vector
             return [item.embedding for item in resp.data]
 
-        # Вызов в отдельном треде, чтобы не блокировать asyncio loop
+        # Call in separate thread to not block asyncio loop
         return await asyncio.to_thread(_sync_call)
 
     def _encode_sync(
@@ -188,7 +188,7 @@ class BookProcessor:
         return embeddings.tolist()
 
     async def get_embeddings(self, texts: List[str]) -> List[List[float]]:
-        # оборачиваем sync call в отдельный поток, чтобы не блокировать FastAPI loop
+        # Wrap sync call in separate thread to not block FastAPI loop
         return await asyncio.to_thread(self._encode_sync, texts)
 
     def sanitize_metadata(self, meta: Dict[str, Any]) -> Dict[str, Any]:
@@ -201,31 +201,31 @@ class BookProcessor:
         out: Dict[str, Any] = {}
         for k, v in (meta or {}).items():
             if v is None:
-                # пропускаем None (альтернатива: out[k] = "")
+                # Skip None (alternative: out[k] = "")
                 continue
             if isinstance(v, (str, bool, int, float)):
                 out[k] = v
                 continue
             if isinstance(v, list):
-                # разрешаем только списки строк
+                # Allow only string lists
                 if all(isinstance(x, str) for x in v):
                     out[k] = v
                 else:
-                    # приводим элементы к строкам
+                    # Convert elements to strings
                     out[k] = [str(x) for x in v]
                 continue
-            # fallback: сериализуем в строку
+            # Fallback: serialize to string
             out[k] = str(v)
         return out
 
     def to_primitive(self, obj: Any):
-        # примитивы — возвращаем как есть
+        # Primitives - return as is
         if isinstance(obj, (str, int, float, bool, type(None))):
             return obj
         # dict / mapping
         if isinstance(obj, dict):
             return {k: self.to_primitive(v) for k, v in obj.items()}
-        # списки/кортежи/сеты
+        # lists/tuples/sets
         if isinstance(obj, (list, tuple, set)):
             return [self.to_primitive(v) for v in obj]
 
@@ -265,7 +265,7 @@ class BookProcessor:
         except TypeError:
             pass
 
-        # last resort — строковое представление (без падения)
+        # Last resort - string representation (without falling)
         try:
             return str(obj)
         except Exception:

@@ -1,3 +1,5 @@
+# app/main.py
+
 import os
 import tempfile
 from contextlib import asynccontextmanager
@@ -71,7 +73,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Bookshelf API", lifespan=lifespan)
 
 
-# Dependencies are now handled in app.core.dependencies
+
 
 
 @app.get("/bookshelf", summary="Get Indexed Books")
@@ -118,7 +120,7 @@ async def upload_book(
     file: UploadFile = File(...),
 ) -> JSONResponse:
     try:
-        # Validation
+        # Validate file
         if not file or not file.filename:
             logger.warning("Upload attempted without file")
             raise validation_http_error("File is required")

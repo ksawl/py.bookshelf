@@ -1,1 +1,1 @@
-# Models package
+# app/models/__init__.py

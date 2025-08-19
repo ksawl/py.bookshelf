@@ -1,3 +1,5 @@
+# app/models/job.py
+
 from datetime import datetime
 from typing import Optional
 from sqlalchemy import Column, String, Integer, DateTime, Text, JSON

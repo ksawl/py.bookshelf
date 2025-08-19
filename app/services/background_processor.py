@@ -1,7 +1,7 @@
 # app/services/background_processor.py
 """
-Отдельный сервис для background обработки файлов.
-Изолирован от основного BookshelfService для лучшей архитектуры.
+Separate service for background file processing.
+Isolated from main BookshelfService for better architecture.
 """
 
 import os
@@ -17,7 +17,7 @@ from app.core.exceptions import DocumentProcessingError, PineconeServiceError
 
 
 class BackgroundProcessor(LoggerMixin):
-    """Отдельный класс для фоновой обработки файлов"""
+    """Separate class for background file processing"""
     
     def __init__(self, settings: Settings, database: DatabaseService):
         self.settings = settings
@@ -28,8 +28,8 @@ class BackgroundProcessor(LoggerMixin):
 
     async def process_file(self, book_id: str) -> None:
         """
-        Обработка файла с использованием DocumentProcessingService.
-        Изолированный метод для background tasks.
+        Process file using DocumentProcessingService.
+        Isolated method for background tasks.
         """
         self.logger.info("Starting file processing", book_id=book_id)
         
@@ -44,7 +44,7 @@ class BackgroundProcessor(LoggerMixin):
         namespace = job.get("namespace")
 
         try:
-            # 1. Обрабатываем документ через специализированный сервис
+            # Process document through specialized service
             self.logger.info("Processing document", book_id=book_id, filename=filename)
             processing_result = await self.document_processor.process_document(
                 book_id, path, filename
@@ -63,9 +63,9 @@ class BackgroundProcessor(LoggerMixin):
                 "extra": {"document_metadata": processing_result["document_metadata"]}
             })
 
-            # 2. Убеждаемся, что индекс существует с правильной размерностью
+            # Ensure index exists with correct dimension
             if embedding_dimension == 0:
-                raise DocumentProcessingError("Не удалось определить размерность эмбеддингов")
+                raise DocumentProcessingError("Failed to determine embedding dimension")
             
             index_name = self.pinecone.create_index_name(book_id)
             chosen_index = await self.pinecone.ensure_index_for_dimension(
@@ -73,7 +73,7 @@ class BackgroundProcessor(LoggerMixin):
             )
             await self.database.update_job(book_id, {"index_name": chosen_index})
 
-            # 3. Загружаем данные в Pinecone батчами
+            # Upload data to Pinecone in batches
             await self._upsert_chunks_to_pinecone(
                 chunks_with_embeddings, namespace, book_id, job, chosen_index
             )
@@ -85,7 +85,7 @@ class BackgroundProcessor(LoggerMixin):
             self.logger.error("File processing failed", book_id=book_id, error=str(e))
             await self.database.finish_job(book_id, success=False, error=str(e))
         finally:
-            # Удаляем временный файл
+            # Remove temporary file
             try:
                 if path and os.path.exists(path):
                     os.remove(path)
@@ -101,7 +101,7 @@ class BackgroundProcessor(LoggerMixin):
         job: Dict[str, Any],
         index_name: str
     ) -> None:
-        """Загружает чанки в Pinecone батчами"""
+        """Upload chunks to Pinecone in batches"""
         BATCH_SIZE = 64
         processed_count = 0
         total_chunks = len(chunks_with_embeddings)
@@ -113,15 +113,15 @@ class BackgroundProcessor(LoggerMixin):
             batch_chunks = chunks_with_embeddings[i:i + BATCH_SIZE]
             
             try:
-                # Подготавливаем данные для upsert
+                # Prepare data for upsert
                 upsert_data = self.document_processor.prepare_for_pinecone_upsert(
                     batch_chunks
                 )
                 
-                # Загружаем в Pinecone
+                # Upload to Pinecone
                 await self.pinecone.upsert(upsert_data, index_name=index_name, namespace=namespace)
                 
-                # Обновляем прогресс
+                # Update progress
                 processed_count += len(batch_chunks)
                 await self.database.increment_processed(book_id, n=len(batch_chunks))
                 
@@ -129,7 +129,7 @@ class BackgroundProcessor(LoggerMixin):
                                 book_id=book_id, batch_num=i//BATCH_SIZE + 1, 
                                 processed=processed_count, total=total_chunks)
                 
-                # Уведомляем callback (если есть)
+                # Notify callback if present
                 callback_url = job.get("callback_url")
                 if callback_url:
                     asyncio.create_task(self._notify_callback(callback_url, book_id))
@@ -148,5 +148,5 @@ class BackgroundProcessor(LoggerMixin):
             async with httpx.AsyncClient() as client:
                 await client.post(callback_url, json=payload, timeout=5.0)
         except Exception:
-            # ignore failures for now
+            # Ignore failures for now
             pass

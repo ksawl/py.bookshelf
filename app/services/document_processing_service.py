@@ -1,11 +1,11 @@
 # app/services/document_processing_service.py
 """
-Централизованный сервис для обработки документов.
-Отвечает за:
-1. Парсинг и извлечение текста из разных форматов
-2. Создание чанков с метаданными
-3. Генерацию эмбеддингов
-4. Подготовку данных для индексации в Pinecone
+Centralized service for document processing.
+Responsible for:
+1. Parsing and text extraction from different formats
+2. Creating chunks with metadata
+3. Generating embeddings
+4. Preparing data for Pinecone indexing
 """
 
 import os
@@ -26,41 +26,41 @@ class DocumentProcessingService:
         filename: str
     ) -> Dict[str, Any]:
         """
-        Полная обработка документа: извлечение текста, чанкинг, эмбеддинги.
+        Complete document processing: text extraction, chunking, embeddings.
         
         Returns:
-            Dict с полями:
-            - chunks: List[Dict] - готовые чанки с эмбеддингами и метаданными
-            - embedding_dimension: int - размерность векторов
-            - total_chunks: int - количество чанков
-            - document_metadata: Dict - метаданные документа
+            Dict with fields:
+            - chunks: List[Dict] - ready chunks with embeddings and metadata
+            - embedding_dimension: int - vector dimension
+            - total_chunks: int - number of chunks
+            - document_metadata: Dict - document metadata
         """
         
-        # 1. Определяем тип файла и извлекаем текст
+        # Determine file type and extract text
         with open(file_path, "rb") as f:
             raw_data = f.read()
         
         file_extension = self.bp.detect_extension(filename, raw_data)
         
-        # 2. Извлекаем текст и структурную информацию
+        # Extract text and structural information
         text_content, structural_info = await self._extract_text_and_structure(
             file_path, file_extension, raw_data
         )
         
-        # 3. Разбиваем на чанки
+        # Split into chunks
         raw_chunks = self.bp.split_into_token_chunks(text_content)
         
-        # 4. Обогащаем чанки метаданными и создаем финальный текст для эмбеддингов
+        # Enrich chunks with metadata and create final text for embeddings
         enriched_chunks = self._enrich_chunks_with_metadata(
             raw_chunks, book_id, filename, structural_info
         )
         
-        # 5. Генерируем эмбеддинги батчами
+        # Generate embeddings in batches
         chunks_with_embeddings = await self._generate_embeddings_for_chunks(
             enriched_chunks
         )
         
-        # 6. Подготавливаем результат
+        # Prepare result
         result = {
             "chunks": chunks_with_embeddings,
             "embedding_dimension": len(chunks_with_embeddings[0]["embedding"]) if chunks_with_embeddings else 0,
@@ -81,34 +81,34 @@ class DocumentProcessingService:
         self, file_path: str, file_extension: str, raw_data: bytes
     ) -> Tuple[str, Dict[str, Any]]:
         """
-        Извлекает текст и структурную информацию в зависимости от типа файла.
+        Extract text and structural information depending on file type.
         
         Returns:
             Tuple[str, Dict]: (text_content, structural_info)
-            structural_info содержит:
-            - headings: List[Tuple[int, str]] для docx
-            - pages: List[Dict] для pdf
+            structural_info contains:
+            - headings: List[Tuple[int, str]] for docx
+            - pages: List[Dict] for pdf
         """
         
         structural_info = {"headings": [], "pages": []}
         
         if file_extension == "docx":
-            # Для DOCX получаем и markdown, и структуру заголовков
+            # For DOCX get both markdown and heading structure
             markdown_text = self.bp.convert_docx_to_markdown(file_path)
             full_text, heading_points = self.bp.extract_headings_from_docx(file_path)
             
-            # Предпочитаем markdown, но если его нет - используем обычный текст
+            # Prefer markdown, but if not available - use plain text
             text_content = markdown_text or full_text
             structural_info["headings"] = heading_points
             
         elif file_extension == "pdf":
-            # Для PDF извлекаем текст и информацию о страницах
+            # For PDF extract text and page information
             full_text, pages_info = self.bp.extract_text_from_pdf(file_path)
             text_content = full_text
             structural_info["pages"] = pages_info
             
         else:
-            # Для остальных форматов (txt, odt) - простое чтение
+            # For other formats (txt, odt) - simple reading
             try:
                 text_content = raw_data.decode("utf-8")
             except UnicodeDecodeError:
@@ -124,7 +124,7 @@ class DocumentProcessingService:
         structural_info: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
         """
-        Обогащает чанки метаданными: заголовки, страницы, позиция в документе.
+        Enrich chunks with metadata: headings, pages, position in document.
         """
         
         enriched_chunks = []
@@ -132,7 +132,7 @@ class DocumentProcessingService:
         pages = structural_info.get("pages", [])
         
         for chunk in raw_chunks:
-            # Базовые метаданные
+            # Basic metadata
             metadata = {
                 "doc_id": book_id,
                 "doc_title": filename,
@@ -142,14 +142,14 @@ class DocumentProcessingService:
                 "actual_tokens": chunk["actual_tokens"],
             }
             
-            # Добавляем информацию о заголовках для DOCX
+            # Add heading information for DOCX
             if headings:
                 heading_chain = self._find_relevant_heading(
                     chunk["token_start"], headings
                 )
                 metadata["heading_chain"] = heading_chain
                 
-                # Формируем финальный текст с заголовком в начале
+                # Form final text with heading at the beginning
                 if heading_chain:
                     chunk_text = f"{heading_chain}\n\n{chunk['text']}"
                 else:
@@ -158,14 +158,14 @@ class DocumentProcessingService:
                 chunk_text = chunk["text"]
                 metadata["heading_chain"] = None
             
-            # Добавляем информацию о страницах для PDF
+            # Add page information for PDF
             if pages:
                 page_info = self._find_relevant_page(
                     chunk["token_start"], pages
                 )
                 metadata.update(page_info)
             
-            # Санитизируем метаданные для Pinecone
+            # Sanitize metadata for Pinecone
             sanitized_metadata = self.bp.sanitize_metadata(metadata)
             
             enriched_chunks.append({
@@ -181,12 +181,12 @@ class DocumentProcessingService:
         self, token_position: int, headings: List[Tuple[int, str]]
     ) -> Optional[str]:
         """
-        Находит наиболее подходящий заголовок для данной позиции в тексте.
+        Find most suitable heading for given position in text.
         """
         if not headings:
             return None
         
-        # Ищем последний заголовок, который идет перед или на текущей позиции
+        # Find last heading that comes before or at current position
         relevant_heading = None
         for char_start, heading_chain in headings:
             if char_start <= token_position:
@@ -200,7 +200,7 @@ class DocumentProcessingService:
         self, token_position: int, pages: List[Dict]
     ) -> Dict[str, Any]:
         """
-        Находит информацию о странице для данной позиции в тексте.
+        Find page information for given position in text.
         """
         page_info = {"page": 1, "page_start": 0, "page_end": 0}
         
@@ -219,18 +219,18 @@ class DocumentProcessingService:
         self, enriched_chunks: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """
-        Генерирует эмбеддинги для всех чанков батчами.
+        Generate embeddings for all chunks in batches.
         """
         if not enriched_chunks:
             return []
         
-        # Извлекаем тексты для эмбеддингов
+        # Extract texts for embeddings
         texts_for_embedding = [chunk["text"] for chunk in enriched_chunks]
         
-        # Генерируем эмбеддинги
+        # Generate embeddings
         embeddings = await self.bp.get_embeddings(texts_for_embedding)
         
-        # Добавляем эмбеддинги к чанкам
+        # Add embeddings to chunks
         chunks_with_embeddings = []
         for i, chunk in enumerate(enriched_chunks):
             chunk_with_embedding = chunk.copy()
@@ -243,7 +243,7 @@ class DocumentProcessingService:
         self, chunks_with_embeddings: List[Dict[str, Any]]
     ) -> List[Tuple[str, List[float], Dict[str, Any]]]:
         """
-        Подготавливает данные в формате, необходимом для Pinecone upsert.
+        Prepare data in format required for Pinecone upsert.
         
         Returns:
             List[Tuple[str, List[float], Dict[str, Any]]]: (id, vector, metadata)
@@ -251,7 +251,7 @@ class DocumentProcessingService:
         upsert_data = []
         
         for chunk in chunks_with_embeddings:
-            # Добавляем текст в метаданные для возможности поиска
+            # Add text to metadata for search capability
             metadata_with_text = chunk["metadata"].copy()
             metadata_with_text["text"] = chunk["text"]
             

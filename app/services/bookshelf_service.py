@@ -21,12 +21,12 @@ class BookshelfService(LoggerMixin):
         self.settings = settings
         self.database = database
         
-        # Создаем сервисы для каждого запроса (stateless)
+        # Create services for each request (stateless)
         self.pinecone = PineconeService(settings=settings)
         self.bp = BookProcessor(settings=settings)  
         self.document_processor = DocumentProcessingService(settings=settings)
 
-        # Инициализация LangChain Ollama
+        # Initialize LangChain Ollama
         self.llm = OllamaLLM(model=settings.LLM_MODEL, base_url=settings.OLLAMA_API_BASE_URL)
         self.logger.info("BookshelfService initialized", llm_model=settings.LLM_MODEL)
 
@@ -54,32 +54,32 @@ class BookshelfService(LoggerMixin):
 
     async def get_all_books(self) -> list[str]:
         """Get all books with synchronization between Pinecone and database"""
-        # Получаем индексы из Pinecone и задания из БД параллельно
+        # Get indexes from Pinecone and jobs from DB in parallel
         pinecone_indexes, all_jobs = await asyncio.gather(
             self.pinecone.list_indexes(),
             self.database.get_all_jobs()
         )
         
-        # Извлекаем book_id из завершенных заданий
+        # Extract book_id from completed jobs
         completed_jobs = [job for job in all_jobs if job.get("status") == "done"]
         db_book_ids = set(job["job_id"] for job in completed_jobs)
         
-        # Извлекаем book_id из индексов Pinecone (формат: book-{book_id})
+        # Extract book_id from Pinecone indexes (format: book-{book_id})
         pinecone_book_ids = set()
         for index_name in pinecone_indexes:
             if index_name.startswith("book-"):
                 book_id = index_name.replace("book-", "", 1)
                 pinecone_book_ids.add(book_id)
         
-        # Синхронизируем несоответствия
+        # Synchronize discrepancies
         await self._sync_pinecone_and_db(pinecone_book_ids, db_book_ids)
         
-        # Возвращаем актуальный список book_id
+        # Return actual list of book_id
         return list(pinecone_book_ids - (db_book_ids - pinecone_book_ids))
 
     async def _sync_pinecone_and_db(self, pinecone_book_ids: set, db_book_ids: set):
-        """Синхронизация между Pinecone и БД"""
-        # 1. Индексы в Pinecone без записей в БД - создаем записи в БД
+        """Synchronization between Pinecone and database"""
+        # Indexes in Pinecone without DB records - create DB records
         orphaned_pinecone = pinecone_book_ids - db_book_ids
         if orphaned_pinecone:
             sync_tasks = []
@@ -87,7 +87,7 @@ class BookshelfService(LoggerMixin):
                 sync_tasks.append(self._create_db_record_from_pinecone(book_id))
             await asyncio.gather(*sync_tasks, return_exceptions=True)
         
-        # 2. Записи в БД без индексов в Pinecone - удаляем из БД
+        # DB records without Pinecone indexes - remove from DB
         orphaned_db = db_book_ids - pinecone_book_ids
         if orphaned_db:
             delete_tasks = []
@@ -96,7 +96,7 @@ class BookshelfService(LoggerMixin):
             await asyncio.gather(*delete_tasks, return_exceptions=True)
 
     async def _create_db_record_from_pinecone(self, book_id: str):
-        """Создает запись в БД на основе метаданных из Pinecone"""
+        """Create DB record based on Pinecone metadata"""
         try:
             book_metadata = await self.pinecone.get_book_metadata(book_id)
             namespace = f"book_{book_id}"
@@ -104,7 +104,7 @@ class BookshelfService(LoggerMixin):
             
             job_info = {
                 "filename": book_metadata.get("sample_metadata", {}).get("doc_title", f"book_{book_id}"),
-                "path": None,  # файл уже обработан
+                "path": None,  # File already processed
                 "namespace": namespace,
                 "index_name": index_name,
                 "status": "done",
@@ -114,15 +114,15 @@ class BookshelfService(LoggerMixin):
             }
             await self.database.create_job(book_id, job_info)
         except Exception as e:
-            print(f"Ошибка при создании записи БД для book_id {book_id}: {e}")
+            print(f"Error creating DB record for book_id {book_id}: {e}")
 
     async def ask_book_question(self, book_id: str, question: str) -> Answer:
-        """Получение ответа от LLM на основе контекста из книги"""
+        """Get LLM response based on book context"""
         try:
-            # 1) Получаем эмбеддинг и делаем запрос в Pinecone параллельно
+            # Get embedding and query Pinecone in parallel
             q_emb_list = await self.bp.get_embeddings([question])
             if not q_emb_list:
-                raise RuntimeError("get_embeddings вернул пустой результат")
+                raise RuntimeError("get_embeddings returned empty result")
             
             q_emb = q_emb_list[0]
             resp = await self.pinecone.query_top_k(
@@ -133,11 +133,11 @@ class BookshelfService(LoggerMixin):
                 include_values=False,
             )
 
-            # 2) Обрабатываем результаты поиска
+            # Process search results
             matches = resp.get("matches", []) if isinstance(resp, dict) else []
             context_chunks = self._process_search_matches(matches)
 
-            # 3) Формируем контекст и вызываем LLM
+            # Build context and call LLM
             combined_context = self._build_context(context_chunks)
             prompt = self._build_prompt(combined_context, question)
             
@@ -153,15 +153,15 @@ class BookshelfService(LoggerMixin):
             )
 
         except Exception as e:
-            print(f"Ошибка в ask_book_question: {e}")
+            print(f"Error in ask_book_question: {e}")
             return Answer(
-                text=f"Ошибка при обработке запроса: {e}", 
+                text=f"Error processing request: {e}", 
                 sources=[], 
                 prompt=""
             )
 
     def _process_search_matches(self, matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Обрабатывает результаты поиска из Pinecone"""
+        """Process search results from Pinecone"""
         context_chunks = []
         for m in matches:
             mid = m.get("id")
@@ -178,7 +178,7 @@ class BookshelfService(LoggerMixin):
         return context_chunks
 
     def _build_context(self, context_chunks: List[Dict[str, Any]]) -> str:
-        """Формирует контекст для LLM из найденных чанков"""
+        """Build LLM context from found chunks"""
         parts = []
         for c in context_chunks:
             src = (
@@ -198,33 +198,33 @@ class BookshelfService(LoggerMixin):
         return combined_context
 
     def _build_prompt(self, context: str, question: str) -> str:
-        """Формирует промпт для LLM"""
+        """Build prompt for LLM"""
         return (
-            "Ты — помощник. Отвечай используя ТОЛЬКО предоставленные фрагменты и только "
-            "по содержанию фрагментов, не добавляя ничего лишнего. Если информации "
-            "недостаточно, честно скажи об этом.\n\n"
-            f"Контекст:\n{context}\n\n"
-            f"Вопрос: {question}\n\n"
-            "Ответ (коротко):"
+            "You are an assistant. Answer using ONLY the provided fragments and only "
+            "based on fragment content, without adding anything extra. If information "
+            "is insufficient, honestly say so.\n\n"
+            f"Context:\n{context}\n\n"
+            f"Question: {question}\n\n"
+            "Answer (briefly):"
         )
 
     async def remove_book(self, book_id: str) -> Dict[str, Any]:
         """Remove book from Pinecone index and delete corresponding DB record"""
         self.logger.info("Removing book", book_id=book_id)
         
-        # Проверяем существование книги в БД
+        # Check book existence in database
         job = await self.database.get_job(book_id)
         if not job:
             self.logger.warning("Book not found for removal", book_id=book_id)
             return {"success": False, "message": f"Book with id {book_id} not found"}
         
         try:
-            # Удаляем индекс из Pinecone
+            # Delete index from Pinecone
             index_name = self.pinecone.create_index_name(book_id)
             await self.pinecone.delete_index(index_name)
             self.logger.info("Pinecone index deleted", book_id=book_id, index_name=index_name)
             
-            # Удаляем запись из базы данных
+            # Delete record from database
             await self.database.delete_job(book_id)
             self.logger.info("Database record deleted", book_id=book_id)
             
