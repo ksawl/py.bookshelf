@@ -1,7 +1,7 @@
 # app/schemas/book.py
 
 from pydantic import BaseModel
-from typing import List, Optional, Any, Dict
+from typing import List, Optional, Any, Dict, TypedDict
 
 
 class Answer(BaseModel):
@@ -10,7 +10,7 @@ class Answer(BaseModel):
     prompt: str
 
 
-class MetaBook(BaseModel):
+class MetaBook(TypedDict, total=False):
     book_id: str
     namespace: str
     index_name: str

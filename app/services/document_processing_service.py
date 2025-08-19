@@ -51,7 +51,7 @@ class DocumentProcessingService:
         raw_chunks = self.bp.split_into_token_chunks(text_content)
         
         # Enrich chunks with metadata and create final text for embeddings
-        enriched_chunks = self._enrich_chunks_with_metadata(
+        enriched_chunks = await self._enrich_chunks_with_metadata(
             raw_chunks, book_id, filename, structural_info
         )
         
@@ -116,7 +116,7 @@ class DocumentProcessingService:
         
         return text_content, structural_info
 
-    def _enrich_chunks_with_metadata(
+    async def _enrich_chunks_with_metadata(
         self, 
         raw_chunks: List[Dict], 
         book_id: str, 
@@ -144,7 +144,7 @@ class DocumentProcessingService:
             
             # Add heading information for DOCX
             if headings:
-                heading_chain = self._find_relevant_heading(
+                heading_chain = await self._find_relevant_heading(
                     chunk["token_start"], headings
                 )
                 metadata["heading_chain"] = heading_chain
@@ -160,7 +160,7 @@ class DocumentProcessingService:
             
             # Add page information for PDF
             if pages:
-                page_info = self._find_relevant_page(
+                page_info = await self._find_relevant_page(
                     chunk["token_start"], pages
                 )
                 metadata.update(page_info)
@@ -177,7 +177,7 @@ class DocumentProcessingService:
         
         return enriched_chunks
 
-    def _find_relevant_heading(
+    async def _find_relevant_heading(
         self, token_position: int, headings: List[Tuple[int, str]]
     ) -> Optional[str]:
         """
@@ -196,7 +196,7 @@ class DocumentProcessingService:
         
         return relevant_heading
 
-    def _find_relevant_page(
+    async def _find_relevant_page(
         self, token_position: int, pages: List[Dict]
     ) -> Dict[str, Any]:
         """

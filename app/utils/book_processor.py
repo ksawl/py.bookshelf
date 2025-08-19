@@ -157,7 +157,7 @@ class BookProcessor:
 
         _openai_client = OpenAI(api_key=self._settings.OPENAI_API_KEY)
 
-        def _sync_call(self):
+        def _sync_call():
             resp = _openai_client.embeddings.create(
                 model=self._settings.EMBEDDING_MODEL, input=texts
             )
