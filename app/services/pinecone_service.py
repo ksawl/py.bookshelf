@@ -10,40 +10,69 @@ Public methods:
 - query(...)
 """
 
+from __future__ import annotations
+
 import asyncio
-import logging
+from contextlib import asynccontextmanager
 from pinecone import Pinecone, ServerlessSpec
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, AsyncGenerator, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pinecone import Index
 
 from app.schemas.book import MetaBook
 from app.core.config import Settings
+from app.core.logging import LoggerMixin
+from app.core.exceptions import PineconeServiceError
 
 
-class PineconeService:
+class PineconeService(LoggerMixin):
     def __init__(self, settings: Settings, default_dim: int = 384):
         self._settings = settings
         self.index_name = settings.PINECONE_INDEX
-
-        api_key = settings.PINECONE_API_KEY
-        env = settings.PINECONE_ENV
-
-        if not api_key:
-            raise RuntimeError("PINECONE_API_KEY not set")
-
-        # create client instance
-        self.pc = Pinecone(api_key=api_key, environment=env)
-        self.index = None
-        self._host = None
-        # default dim is a fallback; prefer using the actual embeddings dimension
         self.default_dim = default_dim
+        self._pc: Optional[Pinecone] = None
+        self._index_cache: Dict[str, Index] = {}
 
-    def create_index_name(self, book_id: str):
+        if not settings.PINECONE_API_KEY:
+            raise PineconeServiceError("PINECONE_API_KEY not set")
+
+    @property
+    def pc(self) -> Pinecone:
+        """Lazy initialization of Pinecone client."""
+        if self._pc is None:
+            self._pc = Pinecone(
+                api_key=self._settings.PINECONE_API_KEY,
+                environment=self._settings.PINECONE_ENV
+            )
+            self.logger.info("Pinecone client initialized")
+        return self._pc
+
+    def create_index_name(self, book_id: str) -> str:
         return f"book-{book_id}"
 
-    def _describe_index(self, name: str) -> dict:
+    @asynccontextmanager
+    async def get_index(self, index_name: str) -> AsyncGenerator[Index, None]:
+        """Context manager for getting Pinecone index with proper async handling."""
+        if index_name in self._index_cache:
+            yield self._index_cache[index_name]
+            return
+
         try:
-            return self.pc.describe_index(name)
-        except Exception:
+            self.logger.debug("Creating index connection", index_name=index_name)
+            index = await asyncio.to_thread(lambda: self.pc.Index(index_name))
+            self._index_cache[index_name] = index
+            yield index
+        except Exception as e:
+            self.logger.error("Failed to get index", index_name=index_name, error=str(e))
+            raise PineconeServiceError(f"Failed to get index {index_name}: {e}") from e
+
+    async def _describe_index(self, name: str) -> Dict[str, Any]:
+        """Async wrapper for describe_index."""
+        try:
+            return await asyncio.to_thread(self.pc.describe_index, name)
+        except Exception as e:
+            self.logger.warning("Failed to describe index", index_name=name, error=str(e))
             return {}
 
     def _spec_from_env(self) -> ServerlessSpec:
@@ -90,10 +119,9 @@ class PineconeService:
         Выполняет запрос в указанном индексе Pinecone и возвращает результат запроса.
 
         Args:
+            book_id: ID книги для формирования имени индекса и namespace
             vector: вектор запроса (List[float])
             top_k: сколько матчей вернуть
-            index_name: имя индекса в Pinecone; если None, используется default_index_name из конструктора
-            namespace: namespace index (если используете)
             filter: metadata filter (Pinecone filter dict) - опционально
             include_metadata: вернуть metadata
             include_values: вернуть сами векторные значения
@@ -101,21 +129,26 @@ class PineconeService:
         Returns:
             dict: оригинальный ответ от Pinecone Index.query
         """
+        if not book_id:
+            raise PineconeServiceError("book_id is required for query")
+        
+        if not vector:
+            raise PineconeServiceError("vector is required for query")
+
         if not top_k:
             top_k = self._settings.TOP_K
 
-        if not book_id:
-            raise ValueError(
-                "book_id must be provided either to query_top_k or as default in constructor"
-            )
-        idx_name = self.create_index_name(book_id) or self.default_index_name
+        idx_name = self.create_index_name(book_id)
         namespace = f"book_{book_id}"
 
         try:
-            # Подготовим sync вызов (создаём Index динамически, чтобы поддерживать разные индексы на книгу)
-            def _sync_query():
-                index = self.pc.Index(idx_name)
-                return index.query(
+            self.logger.debug("Executing Pinecone query", 
+                            book_id=book_id, index_name=idx_name, 
+                            top_k=top_k, vector_dim=len(vector))
+
+            async with self.get_index(idx_name) as index:
+                resp = await asyncio.to_thread(
+                    index.query,
                     vector=vector,
                     top_k=top_k,
                     namespace=namespace,
@@ -124,21 +157,25 @@ class PineconeService:
                     include_values=include_values,
                 )
 
-            resp = await asyncio.to_thread(_sync_query)
-            # Обычно resp — dict (или object с аттрибутами). Приводим к dict для стабильности.
-            if hasattr(resp, "to_dict"):
-                return resp.to_dict()
-            if isinstance(resp, dict):
-                return resp
-            # fallback: попытка сериализовать
-            return {"matches": list(getattr(resp, "matches", []))}
+                # Normalize response to dict
+                if hasattr(resp, "to_dict"):
+                    result = resp.to_dict()
+                elif isinstance(resp, dict):
+                    result = resp
+                else:
+                    result = {"matches": list(getattr(resp, "matches", []))}
+
+                self.logger.debug("Query completed successfully", 
+                                book_id=book_id, matches_count=len(result.get("matches", [])))
+                return result
 
         except Exception as e:
-            print("Pinecone query error: %s", e)
-            raise
+            self.logger.error("Pinecone query failed", 
+                            book_id=book_id, index_name=idx_name, error=str(e))
+            raise PineconeServiceError(f"Query failed for book {book_id}: {e}") from e
 
     async def ensure_index_for_dimension(
-        self, desired_dim: int, target: Optional[int] = None
+        self, desired_dim: int, target: Optional[str] = None
     ) -> str:
         if not target:
             target = self._settings.PINECONE_INDEX
@@ -157,76 +194,86 @@ class PineconeService:
         existing, _create_index = await asyncio.to_thread(_sync_operations)
 
         if target in existing:
-            info = self._describe_index(target)
+            info = await self._describe_index(target)
             dim = info.get("dimension") or info.get("index_config", {}).get("dimension")
             if not dim:
                 new_name = f"{self.index_name}-dense-{desired_dim}"
                 if new_name not in existing:
+                    self.logger.info("Creating new index", index_name=new_name, dimension=desired_dim)
                     await asyncio.to_thread(_create_index, new_name, desired_dim)
                 target = new_name
             elif int(dim) != int(desired_dim):
                 new_name = f"{self.index_name}-dense-{desired_dim}"
                 if new_name not in existing:
+                    self.logger.info("Creating new index for different dimension", 
+                                   index_name=new_name, dimension=desired_dim)
                     await asyncio.to_thread(_create_index, new_name, desired_dim)
                 target = new_name
         else:
             # create the requested index with ServerlessSpec
+            self.logger.info("Creating new index", index_name=target, dimension=desired_dim)
             await asyncio.to_thread(_create_index, target, desired_dim)
 
-        # describe chosen index and init Index client as before
-        info = self._describe_index(target)
-        host = info.get("host") or info.get("server", {}).get("host") or target
-        if not host:
-            raise RuntimeError(
-                "Unable to determine index host for chosen index: %s" % target
-            )
-        self._host = host
-        self.index = self.pc.Index(host=host)
-        self.index_name = target
+        self.logger.info("Index ensured", index_name=target, dimension=desired_dim)
         return target
 
-    def upsert(
+    async def upsert(
         self,
-        vectors: List[Tuple[str, List[float], dict]],
+        vectors: List[Tuple[str, List[float], Dict[str, Any]]],
+        index_name: str,
         namespace: Optional[str] = None,
-    ):
-        if not self.index:
-            raise RuntimeError(
-                "Index client not initialized. Call ensure_index_for_dimension() first."
-            )
-        if namespace:
-            return self.index.upsert(vectors=vectors, namespace=namespace)
-        return self.index.upsert(vectors=vectors)
+    ) -> Dict[str, Any]:
+        """Async upsert operation."""
+        if not vectors:
+            raise PineconeServiceError("No vectors provided for upsert")
 
-    def query(
-        self,
-        vector: List[float],
-        top_k: int = 5,
-        namespace: Optional[str] = None,
-        include_metadata: bool = True,
-    ):
-        if not self.index:
-            raise RuntimeError(
-                "Index client not initialized. Call ensure_index_for_dimension() first."
-            )
-        return self.index.query(
-            vector=vector,
-            top_k=top_k,
-            namespace=namespace,
-            include_metadata=include_metadata,
-        )
-
-    def delete_index(self, name: str):
-        """Синхронное удаление индекса - не требует async"""
         try:
-            self.pc.delete_index(name)
-        except Exception as e:
-            print("Index delete error:", e)
+            self.logger.debug("Upserting vectors", 
+                            index_name=index_name, count=len(vectors), namespace=namespace)
 
-    async def list_indexes(self):
-        def _sync_list():
-            return [i["name"] for i in self.pc.list_indexes()]
-        return await asyncio.to_thread(_sync_list)
+            async with self.get_index(index_name) as index:
+                result = await asyncio.to_thread(
+                    index.upsert,
+                    vectors=vectors,
+                    namespace=namespace
+                )
+                
+                self.logger.debug("Upsert completed", 
+                                index_name=index_name, count=len(vectors))
+                return result
+
+        except Exception as e:
+            self.logger.error("Upsert failed", 
+                            index_name=index_name, count=len(vectors), error=str(e))
+            raise PineconeServiceError(f"Upsert failed: {e}") from e
+
+    async def delete_index(self, name: str) -> None:
+        """Async deletion of Pinecone index."""
+        try:
+            self.logger.info("Deleting index", index_name=name)
+            await asyncio.to_thread(self.pc.delete_index, name)
+            
+            # Remove from cache if present
+            if name in self._index_cache:
+                del self._index_cache[name]
+                
+            self.logger.info("Index deleted successfully", index_name=name)
+        except Exception as e:
+            self.logger.error("Failed to delete index", index_name=name, error=str(e))
+            raise PineconeServiceError(f"Failed to delete index {name}: {e}") from e
+
+    async def list_indexes(self) -> List[str]:
+        """List all available Pinecone indexes."""
+        try:
+            def _sync_list():
+                return [i["name"] for i in self.pc.list_indexes()]
+            
+            indexes = await asyncio.to_thread(_sync_list)
+            self.logger.debug("Listed indexes", count=len(indexes))
+            return indexes
+        except Exception as e:
+            self.logger.error("Failed to list indexes", error=str(e))
+            raise PineconeServiceError(f"Failed to list indexes: {e}") from e
 
     async def get_book_metadata(self, book_id: str) -> MetaBook:
         """
@@ -255,45 +302,38 @@ class PineconeService:
             "error": None,
         }
 
-        # Обернем синхронные операции в отдельную функцию
-        def _sync_setup_and_stats():
-            info = self._describe_index(index_name)
-            host = info.get("host") or info.get("server", {}).get("host") or index_name
-            if not host:
-                raise RuntimeError(
-                    "Unable to determine index host for chosen index: %s" % index_name
-                )
-            self._host = host
-            self.index = self.pc.Index(host=host)
-            self.index_name = index_name
+        # Async setup and stats
+        info = await self._describe_index(index_name)
+        host = info.get("host") or info.get("server", {}).get("host") or index_name
+        if not host:
+            raise RuntimeError(
+                "Unable to determine index host for chosen index: %s" % index_name
+            )
 
-            # 1) Попытка получить статистику индекса (describe_index_stats / describe_index)
-            stats = {}
-            try:
+        # 1) Попытка получить статистику индекса (describe_index_stats / describe_index)
+        stats = {}
+        try:
+            def _get_stats():
                 # несколько вариантов вызова для совместимости с разными SDK-версиями
                 try:
-                    stats = self.pc.describe_index_stats(index_name=index_name)
+                    return self.pc.describe_index_stats(index_name=index_name)
                 except TypeError:
                     # некоторые версии ожидают positional arg
                     try:
-                        stats = self.pc.describe_index_stats(index_name)
+                        return self.pc.describe_index_stats(index_name)
                     except Exception:
-                        stats = {}
+                        return {}
                 except Exception:
-                    # fallback: попытка вызвать на уровне index client (если он инициализирован)
-                    if self.index:
-                        try:
-                            stats = self.index.describe_index_stats()
-                        except Exception:
-                            stats = {}
-                    else:
-                        stats = {}
-            except Exception:
-                stats = {}
-            return stats
-
-        # Выполняем синхронные операции в отдельном потоке
-        stats = await asyncio.to_thread(_sync_setup_and_stats)
+                    # fallback: попытка вызвать на уровне index client
+                    try:
+                        index = self.pc.Index(index_name)
+                        return index.describe_index_stats()
+                    except Exception:
+                        return {}
+            
+            stats = await asyncio.to_thread(_get_stats)
+        except Exception:
+            stats = {}
 
         out["raw_stats"] = stats
 
@@ -333,7 +373,7 @@ class PineconeService:
         # 2) Попробуем получить пример метаданных одного элемента из namespace.
         # Для этого нам нужен векторный размер (dimension), чтобы сделать dummy-query (нулевой вектор).
         try:
-            info = self._describe_index(index_name) or {}
+            info = await self._describe_index(index_name) or {}
             dim = info.get("dimension") or info.get("index_config", {}).get("dimension")
             if dim:
                 dim = int(dim)
@@ -341,16 +381,15 @@ class PineconeService:
                 zero_vec = [0.0] * dim
                 # безопасно запрашиваем top_k=1 в конкретном namespace
                 try:
-                    # Обернем query в отдельный поток
-                    def _sync_query():
-                        return self.index.query(
+                    # Используем новый async API
+                    async with self.get_index(index_name) as index:
+                        resp = await asyncio.to_thread(
+                            index.query,
                             vector=zero_vec,
                             top_k=1,
                             namespace=namespace,
                             include_metadata=True,
                         )
-                    
-                    resp = await asyncio.to_thread(_sync_query)
                     # нормализуем ответ в dict-like
                     matches = None
                     if isinstance(resp, dict):
@@ -407,8 +446,8 @@ class PineconeService:
             return obj
         
         # Обработка проблемных типов, которые не сериализуются
-        if isinstance(obj, logging.Logger):
-            return f"<Logger: {obj.name}>"
+        if hasattr(obj, '__class__') and obj.__class__.__name__ == 'Logger':
+            return f"<Logger: {getattr(obj, 'name', 'unknown')}>"
         
         # Обработка других проблемных типов
         if hasattr(obj, '__module__') and obj.__module__ in ['logging', 'threading', 'asyncio']:
@@ -435,8 +474,8 @@ class PineconeService:
                         # Пропускаем приватные атрибуты и атрибуты с подчеркиванием
                         if key.startswith('_'):
                             continue
-                        # Пропускаем типы, которые точно не сериализуются
-                        if isinstance(value, (logging.Logger, type, type(lambda: None))):
+                        # Пропускаем типы, которые точно не сериализуются  
+                        if isinstance(value, (type, type(lambda: None))) or (hasattr(value, '__class__') and value.__class__.__name__ == 'Logger'):
                             continue
                         obj_dict[key] = value
                     result = self._to_primitive(obj_dict, _seen)

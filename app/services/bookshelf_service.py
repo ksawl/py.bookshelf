@@ -5,7 +5,6 @@ import os
 from typing import Optional, List, Dict, Any
 from langchain_ollama.llms import OllamaLLM
 
-
 from app.schemas.book import Answer, MetaBook
 from app.services.pinecone_service import PineconeService
 from app.services.database_service import DatabaseService
@@ -13,9 +12,11 @@ from app.services.document_processing_service import DocumentProcessingService
 from app.schemas.job import JobInfo
 from app.core.config import Settings
 from app.utils.book_processor import BookProcessor
+from app.core.logging import LoggerMixin
+from app.core.exceptions import BookshelfError, LLMServiceError
 
 
-class BookshelfService:
+class BookshelfService(LoggerMixin):
     def __init__(self, settings: Settings, database: DatabaseService):
         self.settings = settings
         self.database = database
@@ -27,6 +28,7 @@ class BookshelfService:
 
         # Инициализация LangChain Ollama
         self.llm = OllamaLLM(model=settings.LLM_MODEL, base_url=settings.OLLAMA_API_BASE_URL)
+        self.logger.info("BookshelfService initialized", llm_model=settings.LLM_MODEL)
 
     async def enqueue_file(
         self, file_path: str, filename: str, callback_url: Optional[str] = None
@@ -206,22 +208,28 @@ class BookshelfService:
             "Ответ (коротко):"
         )
 
-    async def remove_book(self, book_id: str) -> dict:
+    async def remove_book(self, book_id: str) -> Dict[str, Any]:
         """Remove book from Pinecone index and delete corresponding DB record"""
+        self.logger.info("Removing book", book_id=book_id)
+        
         # Проверяем существование книги в БД
         job = await self.database.get_job(book_id)
         if not job:
+            self.logger.warning("Book not found for removal", book_id=book_id)
             return {"success": False, "message": f"Book with id {book_id} not found"}
         
         try:
             # Удаляем индекс из Pinecone
             index_name = self.pinecone.create_index_name(book_id)
-            self.pinecone.delete_index(index_name)
+            await self.pinecone.delete_index(index_name)
+            self.logger.info("Pinecone index deleted", book_id=book_id, index_name=index_name)
             
             # Удаляем запись из базы данных
             await self.database.delete_job(book_id)
+            self.logger.info("Database record deleted", book_id=book_id)
             
             return {"success": True, "message": f"Book {book_id} successfully removed"}
             
         except Exception as e:
+            self.logger.error("Failed to remove book", book_id=book_id, error=str(e))
             return {"success": False, "message": f"Error removing book {book_id}: {str(e)}"}

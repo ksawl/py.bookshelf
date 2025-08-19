@@ -12,168 +12,226 @@ from fastapi import (
 )
 from pathlib import Path
 from typing import Annotated
-from functools import lru_cache
 from fastapi.responses import JSONResponse
 
 from app.services.bookshelf_service import BookshelfService
-from app.services.database_service import DatabaseService
 from app.services.background_processor import BackgroundProcessor
 from app.schemas.book import Answer, MetaBook
-from app.core import config as settings
+from app.core.config import Settings, get_settings
+from app.core.logging import setup_logging, get_logger
+from app.core.dependencies import (
+    get_database_service,
+    get_bookshelf_service,
+    get_background_processor
+)
+from app.core.exceptions import (
+    ConfigurationError,
+    validation_http_error,
+    not_found_http_error,
+    internal_server_http_error
+)
+
+
+logger = get_logger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Application lifespan - startup and shutdown"""
     # Startup
-    db = _create_database_singleton()
-    await db.init_db()
-    yield
-    # Shutdown (if needed)
-    # await db.close_connections() - if needed
+    logger.info("Starting Bookshelf API")
+    
+    try:
+        # Setup logging
+        setup_logging(log_level="INFO")
+        
+        # Validate configuration
+        settings = get_settings()
+        settings.validate_runtime_dependencies()
+        logger.info("Configuration validated successfully")
+        
+        # Initialize database
+        db_service = get_database_service(settings)
+        await db_service.init_db()
+        logger.info("Database initialized successfully")
+        
+        yield
+        
+    except ConfigurationError as e:
+        logger.error("Configuration error during startup", error=str(e))
+        raise
+    except Exception as e:
+        logger.error("Unexpected error during startup", error=str(e))
+        raise
+    finally:
+        # Shutdown
+        logger.info("Shutting down Bookshelf API")
 
 
 app = FastAPI(title="Bookshelf API", lifespan=lifespan)
 
 
-@lru_cache()
-def _create_database_singleton() -> DatabaseService:
-    """Keep database singleton for connection pooling"""
-    return DatabaseService(settings=settings.get_settings())
-
-
-def create_bookshelf_service(
-    cfg: settings.Settings = Depends(settings.get_settings),
-) -> BookshelfService:
-    """Create new BookshelfService instance for each request (stateless)"""
-    db = _create_database_singleton()
-    return BookshelfService(settings=cfg, database=db)
-
-
-def create_background_processor(
-    cfg: settings.Settings = Depends(settings.get_settings),
-) -> BackgroundProcessor:
-    """Create new BackgroundProcessor instance for background tasks"""
-    db = _create_database_singleton()
-    return BackgroundProcessor(settings=cfg, database=db)
+# Dependencies are now handled in app.core.dependencies
 
 
 @app.get("/bookshelf", summary="Get Indexed Books")
 async def get_books_list(
-    service: BookshelfService = Depends(create_bookshelf_service),
+    service: Annotated[BookshelfService, Depends(get_bookshelf_service)],
 ) -> list[str]:
     try:
-        return await service.get_all_books()
+        logger.info("Retrieving books list")
+        books = await service.get_all_books()
+        logger.info("Successfully retrieved books list", count=len(books))
+        return books
     except Exception as e:
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Error retrieving books list: {str(e)}"
-        )
+        logger.error("Failed to retrieve books list", error=str(e))
+        raise internal_server_http_error("Failed to retrieve books list")
 
 
 @app.get("/bookshelf/{book_id}", summary="Get Meta from Book")
 async def get_book_info(
     book_id: str,
-    service: BookshelfService = Depends(create_bookshelf_service),
+    service: Annotated[BookshelfService, Depends(get_bookshelf_service)],
 ) -> MetaBook:
     try:
+        logger.info("Retrieving book metadata", book_id=book_id)
         book = await service.get_book(book_id)
         if not book:
-            raise HTTPException(status_code=404, detail=f"Book with id '{book_id}' not found")
+            logger.warning("Book not found", book_id=book_id)
+            raise not_found_http_error("Book", book_id)
+        
+        logger.info("Successfully retrieved book metadata", book_id=book_id)
         return book
+    except HTTPException:
+        raise
     except Exception as e:
-        # Если это уже HTTPException, перебрасываем как есть
-        if isinstance(e, HTTPException):
-            raise
-        # Для других ошибок возвращаем 500
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Error retrieving book metadata: {str(e)}"
-        )
+        logger.error("Failed to retrieve book metadata", book_id=book_id, error=str(e))
+        raise internal_server_http_error("Failed to retrieve book metadata")
 
 
 @app.post("/bookshelf", summary="Add Book")
 async def upload_book(
     background: BackgroundTasks,
+    service: Annotated[BookshelfService, Depends(get_bookshelf_service)],
+    processor: Annotated[BackgroundProcessor, Depends(get_background_processor)],
+    cfg: Annotated[Settings, Depends(get_settings)],
     file: UploadFile = File(...),
-    service: BookshelfService = Depends(create_bookshelf_service),
-    cfg: settings.Settings = Depends(settings.get_settings),
-) -> str:
-    # basic validation
-    if not file:
-        raise HTTPException(status_code=400, detail="File is required")
+) -> JSONResponse:
+    try:
+        # Validation
+        if not file or not file.filename:
+            logger.warning("Upload attempted without file")
+            raise validation_http_error("File is required")
 
-    filename = file.filename
-    ext = Path(filename).suffix.lower().lstrip(".")
-    if ext not in cfg.ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
+        filename = file.filename
+        ext = Path(filename).suffix.lower().lstrip(".")
+        
+        if ext not in cfg.ALLOWED_EXTENSIONS:
+            logger.warning("Unsupported file type attempted", 
+                         filename=filename, extension=ext, 
+                         allowed=list(cfg.ALLOWED_EXTENSIONS))
+            raise validation_http_error(
+                f"Unsupported file type: {ext}. Allowed: {', '.join(cfg.ALLOWED_EXTENSIONS)}"
+            )
 
-    # save to tmp
-    tmp_dir = tempfile.gettempdir()
-    tmp_path = os.path.join(tmp_dir, f"upload_{os.urandom(6).hex()}_{filename}")
-    contents = await file.read()
-    with open(tmp_path, "wb") as f:
-        f.write(contents)
+        logger.info("Starting file upload", filename=filename, size=file.size)
 
-    # enqueue in service: returns book_id
-    book_id = await service.enqueue_file(tmp_path, filename)
+        # Save to temporary location
+        tmp_dir = tempfile.gettempdir()
+        tmp_path = os.path.join(tmp_dir, f"upload_{os.urandom(6).hex()}_{filename}")
+        
+        contents = await file.read()
+        with open(tmp_path, "wb") as f:
+            f.write(contents)
+        
+        logger.info("File saved to temporary location", tmp_path=tmp_path, size=len(contents))
 
-    # schedule background processing - используем отдельный BackgroundProcessor
-    processor = create_background_processor(cfg)
-    background.add_task(processor.process_file, book_id)
+        # Enqueue processing job
+        book_id = await service.enqueue_file(tmp_path, filename)
+        logger.info("File enqueued for processing", book_id=book_id, filename=filename)
 
-    return JSONResponse(
-        status_code=202, content={"doc_id": book_id, "status": "accepted"}
-    )
+        # Schedule background processing
+        background.add_task(processor.process_file, book_id)
+        logger.info("Background processing scheduled", book_id=book_id)
+
+        return JSONResponse(
+            status_code=202, 
+            content={"doc_id": book_id, "status": "accepted", "filename": filename}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to upload book", filename=getattr(file, 'filename', 'unknown'), error=str(e))
+        raise internal_server_http_error("Failed to upload book")
 
 
 @app.get("/bookshelf/{book_id}/status")
 async def get_status(
     book_id: str,
-    service: BookshelfService = Depends(create_bookshelf_service),
+    service: Annotated[BookshelfService, Depends(get_bookshelf_service)],
 ):
     try:
+        logger.info("Retrieving job status", book_id=book_id)
         status = await service.get_job_status(book_id)
         if not status:
-            raise HTTPException(status_code=404, detail=f"Job with book_id '{book_id}' not found")
+            logger.warning("Job not found", book_id=book_id)
+            raise not_found_http_error("Job", book_id)
+        
+        logger.info("Successfully retrieved job status", book_id=book_id, status=status.get('status'))
         return status
+    except HTTPException:
+        raise
     except Exception as e:
-        if isinstance(e, HTTPException):
-            raise
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error retrieving job status: {str(e)}"
-        )
+        logger.error("Failed to retrieve job status", book_id=book_id, error=str(e))
+        raise internal_server_http_error("Failed to retrieve job status")
 
 
 @app.post("/bookshelf/{book_id}", summary="Send Question from Book")
 async def ask_question(
     book_id: str,
     q: Annotated[str, Query(max_length=300)],
-    service: BookshelfService = Depends(create_bookshelf_service),
+    service: Annotated[BookshelfService, Depends(get_bookshelf_service)],
 ) -> Answer:
     try:
-        return await service.ask_book_question(book_id, q)
+        if not q.strip():
+            logger.warning("Empty question attempted", book_id=book_id)
+            raise validation_http_error("Question cannot be empty")
+        
+        logger.info("Processing question", book_id=book_id, question_length=len(q))
+        answer = await service.ask_book_question(book_id, q)
+        logger.info("Successfully processed question", book_id=book_id, 
+                   sources_count=len(answer.sources))
+        return answer
+    except HTTPException:
+        raise
     except Exception as e:
-        if isinstance(e, HTTPException):
-            raise
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error processing question: {str(e)}"
-        )
+        logger.error("Failed to process question", book_id=book_id, question=q[:50], error=str(e))
+        raise internal_server_http_error("Failed to process question")
 
 
 @app.delete("/bookshelf/{book_id}", summary="Remove Book")
 async def delete_book(
     book_id: str,
-    service: BookshelfService = Depends(create_bookshelf_service),
+    service: Annotated[BookshelfService, Depends(get_bookshelf_service)],
 ):
-    result = await service.remove_book(book_id)
-    
-    if not result["success"]:
-        if "not found" in result["message"]:
-            raise HTTPException(status_code=404, detail=result["message"])
-        else:
-            raise HTTPException(status_code=500, detail=result["message"])
-    
-    return {"status": "success", "message": result["message"], "book_id": book_id}
+    try:
+        logger.info("Deleting book", book_id=book_id)
+        result = await service.remove_book(book_id)
+        
+        if not result["success"]:
+            if "not found" in result["message"].lower():
+                logger.warning("Book not found for deletion", book_id=book_id)
+                raise not_found_http_error("Book", book_id)
+            else:
+                logger.error("Failed to delete book", book_id=book_id, message=result["message"])
+                raise internal_server_http_error(result["message"])
+        
+        logger.info("Successfully deleted book", book_id=book_id)
+        return {"status": "success", "message": result["message"], "book_id": book_id}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to delete book", book_id=book_id, error=str(e))
+        raise internal_server_http_error("Failed to delete book")
