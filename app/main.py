@@ -1,6 +1,7 @@
 # app/main.py
 
 import os
+import asyncio
 import tempfile
 from contextlib import asynccontextmanager
 from fastapi import (
@@ -79,7 +80,7 @@ async def get_books_list(
 ) -> list[str]:
     try:
         logger.info("Retrieving books list")
-        books = await service.get_all_books()
+        books = await asyncio.to_thread(service.get_all_books)
         logger.info("Successfully retrieved books list", count=len(books))
         return books
     except Exception as e:
@@ -94,7 +95,7 @@ async def get_book_info(
 ) -> MetaBook:
     try:
         logger.info("Retrieving book metadata", book_id=book_id)
-        book = await service.get_book(book_id)
+        book = await asyncio.to_thread(service.get_book, book_id)
         if not book:
             logger.warning("Book not found", book_id=book_id)
             raise not_found_http_error("Book", book_id)
@@ -151,7 +152,7 @@ async def upload_book(
         )
 
         # Enqueue processing job
-        book_id = await service.enqueue_file(tmp_path, filename)
+        book_id = await asyncio.to_thread(service.enqueue_file, tmp_path, filename)
         logger.info("File enqueued for processing", book_id=book_id, filename=filename)
 
         # Schedule background processing
@@ -181,7 +182,7 @@ async def get_status(
 ):
     try:
         logger.info("Retrieving job status", book_id=book_id)
-        status = await service.get_job_status(book_id)
+        status = await asyncio.to_thread(service.get_job_status, book_id)
         if not status:
             logger.warning("Job not found", book_id=book_id)
             raise not_found_http_error("Job", book_id)
@@ -211,7 +212,7 @@ async def ask_question(
             raise validation_http_error("Question cannot be empty")
 
         logger.info("Processing question", book_id=book_id, question_length=len(q))
-        answer = await service.ask_book_question(book_id, q)
+        answer = await asyncio.to_thread(service.ask_book_question, book_id, q)
         logger.info(
             "Successfully processed question",
             book_id=book_id,
@@ -234,7 +235,7 @@ async def delete_book(
 ):
     try:
         logger.info("Deleting book", book_id=book_id)
-        result = await service.remove_book(book_id)
+        result = await asyncio.to_thread(service.remove_book, book_id)
 
         if not result["success"]:
             if "not found" in result["message"].lower():

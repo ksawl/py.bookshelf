@@ -1,13 +1,15 @@
 # app/core/database_engine.py
 
+from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.pool import StaticPool, QueuePool
 from functools import lru_cache
 
 
 @lru_cache()
 def get_database_engine(database_url: str):
-    """Create and cache database engine"""
+    """Create and cache async database engine"""
     # Convert sqlite:/// to sqlite+aiosqlite:///
     if database_url.startswith("sqlite:///"):
         database_url = database_url.replace("sqlite:///", "sqlite+aiosqlite:///")
@@ -30,8 +32,41 @@ def get_database_engine(database_url: str):
 
 
 @lru_cache()
+def get_sync_database_engine(database_url: str):
+    """Create and cache synchronous database engine with connection pool"""
+    # Keep original sqlite:/// format for sync engine
+    sync_url = database_url
+    if sync_url.startswith("sqlite+aiosqlite:///"):
+        sync_url = sync_url.replace("sqlite+aiosqlite:///", "sqlite:///")
+
+    # SQLite specific configuration
+    connect_args = {}
+    engine_kwargs = {
+        "connect_args": connect_args,
+        "echo": False,  # Set to True for SQL debugging
+    }
+    
+    if "sqlite" in sync_url:
+        connect_args.update({
+            "check_same_thread": False,
+        })
+        engine_kwargs["poolclass"] = StaticPool
+    else:
+        # For other databases, use connection pool
+        engine_kwargs.update({
+            "poolclass": QueuePool,
+            "pool_size": 10,  # Max pool size
+            "max_overflow": 20,  # Additional connections beyond pool_size
+            "pool_pre_ping": True,  # Validate connections before use
+        })
+
+    engine = create_engine(sync_url, **engine_kwargs)
+    return engine
+
+
+@lru_cache()
 def get_session_maker(database_url: str):
-    """Create and cache session maker"""
+    """Create and cache async session maker"""
     engine = get_database_engine(database_url)
     return async_sessionmaker(
         engine,
@@ -40,8 +75,26 @@ def get_session_maker(database_url: str):
     )
 
 
+@lru_cache()
+def get_sync_session_maker(database_url: str):
+    """Create and cache synchronous session maker"""
+    engine = get_sync_database_engine(database_url)
+    return sessionmaker(
+        engine,
+        class_=Session,
+        expire_on_commit=False,
+    )
+
+
 async def get_async_session(database_url: str) -> AsyncSession:
     """Get async database session"""
     session_maker = get_session_maker(database_url)
     async with session_maker() as session:
+        yield session
+
+
+def get_sync_session(database_url: str) -> Session:
+    """Get synchronous database session"""
+    session_maker = get_sync_session_maker(database_url)
+    with session_maker() as session:
         yield session
