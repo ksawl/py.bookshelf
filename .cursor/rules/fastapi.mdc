@@ -2,118 +2,79 @@
 globs: *.py
 alwaysApply: false
 ---
-You are an expert in Python, FastAPI, and building scalable APIs.
+Ты эксперт по Python, FastAPI и созданию масштабируемых API.
 
-Key Principles
-- Write concise, technical answers with precise Python examples.
-- Use classes where appropriate, otherwise stick to functional, declarative programming.
-- Favor iteration and modularization over code duplication.
-- Use descriptive variable names with auxiliary verbs (e.g., is_active, has_permission).
-- Use lowercase letters with underscores for directories and files (e.g., routers/user_routes.py).
-- Favor named exports for routes and utility functions.
-- Use the Get Object, Return Object (RORO) pattern.
-
-Python/FastAPI
-- Use def for pure functions and async def for asynchronous operations.
-- Use type hints for all function signatures. Prefer Pydantic models over simple dictionaries for input validation. – File structure: exported router, subroutes, utilities, static content, types (models, schemas).
-– Avoid unnecessary curly braces in conditionals.
-– Omit curly braces for single-line statements in conditionals.
-– Use concise, single-line syntax for simple conditionals (e.g. if condition: do_something()).
-
-Error Handling and Validation
-– Prioritize error handling and edge cases:
-– Handle errors and edge cases at the beginning of functions.
-– Use early returns for error conditions to avoid deeply nested if statements.
-– Place the happy path at the end of a function to improve readability.
-– Avoid unnecessary else statements; use the if-return pattern instead.
-– Use guard clauses to handle preconditions and invalid states early.
-- Implement proper error logging and display clear error messages.
-- Use custom error types or error factories for consistent error handling.
-
-Dependencies
-- FastAPI
-- Pydantic v2
-- Asynchronous database libraries such as asyncpg or aiomysql
-- SQLAlchemy 2.0 (if using ORM features)
-
-FastAPI-specific guidelines
-- Use functional components (simple functions) and Pydantic models to validate input and response schemas.
-- Use declarative route definitions with clear return type annotations.
-- Use def for synchronous operations and async def for asynchronous ones.
-- Minimize @app.on_event("startup") and @app.on_event("shutdown"); , favor lifecycle context managers to manage startup and shutdown events.
-- Use middleware for logging, error monitoring, and performance optimization.
-- Optimize performance by using async functions for I/O-bound tasks, caching strategies, and lazy loading.
-- Use HTTPException for expected errors and model them as specific HTTP responses. – Use middleware to handle unexpected errors, logging, and error monitoring.
-- Use Pydantic's BaseModel for consistent I/O validation and response schemas.
-
-Performance Optimization
-- Minimize blocking I/O; use async operations for all database calls and external API requests.
-- Implement caching for static and frequently accessed data using tools like Redis or in-memory stores.
-- Optimize data serialization and deserialization with Pydantic.
-- Use lazy loading techniques for large data sets and large API responses.
-
-Basic conventions
-1. Use the FastAPI dependency injection system to manage state and shared resources.
-2. Prioritize API performance metrics (response time, latency, throughput).
-3. Limit blocking operations in routes:
-- Prefer asynchronous and non-blocking streams.
-- Use dedicated asynchronous functions for database and external API operations. - Clearly structure routes and dependencies to optimize readability and maintainability.
-
-See the FastAPI documentation for recommendations on data models, path operations, and middleware.You are an expert in Python, FastAPI, and building scalable APIs.
-
-Key Principles
-- Write concise, technical answers with precise Python examples.
-- Use classes where appropriate, otherwise stick to functional, declarative programming.
-- Favor iteration and modularization over code duplication.
-- Use descriptive variable names with auxiliary verbs (e.g., is_active, has_permission).
-- Use lowercase letters with underscores for directories and files (e.g., routers/user_routes.py).
-- Favor named exports for routes and utility functions.
-- Use the Get Object, Return Object (RORO) pattern.
+Ключевые принципы
+- Пиши краткие, технические ответы с точными примерами на Python.
+- Используй классы где уместно, в остальном придерживайся функционального, декларативного программирования.
+- Предпочитай итерацию и модуляризацию дублированию кода.
+- Используй описательные имена переменных с вспомогательными глаголами (например, is_active, has_permission).
+- Используй строчные буквы с подчеркиванием для директорий и файлов (например, routers/user_routes.py).
+- Предпочитай именованный экспорт для роутов и утилитарных функций.
+- Используй паттерн Get Object, Return Object (RORO).
 
 Python/FastAPI
-- Use def for pure functions and async def for asynchronous operations.
-- Use type hints for all function signatures. Prefer Pydantic models over simple dictionaries for input validation. – File structure: exported router, subroutes, utilities, static content, types (models, schemas).
-– Avoid unnecessary curly braces in conditionals.
-– Omit curly braces for single-line statements in conditionals.
-– Use concise, single-line syntax for simple conditionals (e.g. if condition: do_something()).
+- Используй def для чистых функций и async def для асинхронных операций.
+- Используй type hints для всех сигнатур функций. Предпочитай Pydantic модели простым словарям для валидации ввода.
+- Структура файлов: экспортируемый роутер, подроуты, утилиты, статический контент, типы (модели, схемы).
+- Избегай лишних фигурных скобок в условиях.
+- Опускай фигурные скобки для однострочных операторов в условиях.
+- Используй краткий, однострочный синтаксис для простых условий (например, if condition: do_something()).
+- Всегда проверяй и удаляй не используемые импорты
 
-Error Handling and Validation
-– Prioritize error handling and edge cases:
-– Handle errors and edge cases at the beginning of functions.
-– Use early returns for error conditions to avoid deeply nested if statements.
-– Place the happy path at the end of a function to improve readability.
-– Avoid unnecessary else statements; use the if-return pattern instead.
-– Use guard clauses to handle preconditions and invalid states early.
-- Implement proper error logging and display clear error messages.
-- Use custom error types or error factories for consistent error handling.
+Обработка ошибок и валидация
+- Приоритизируй обработку ошибок и крайних случаев:
+- Обрабатывай ошибки и крайние случаи в начале функций.
+- Используй ранние возвраты для условий ошибок, чтобы избежать глубоко вложенных if операторов.
+- Размещай счастливый путь в конце функции для улучшения читаемости.
+- Избегай лишних else операторов; используй паттерн if-return вместо этого.
+- Используй guard clauses для обработки предусловий и недопустимых состояний рано.
+- Реализуй правильное логирование ошибок и отображай понятные сообщения об ошибках.
+- Используй пользовательские типы ошибок или фабрики ошибок для согласованной обработки ошибок.
 
-Dependencies
+Зависимости
 - FastAPI
 - Pydantic v2
-- Asynchronous database libraries such as asyncpg or aiomysql
-- SQLAlchemy 2.0 (if using ORM features)
+- Асинхронные библиотеки баз данных такие как asyncpg или aiomysql
+- SQLAlchemy 2.0 (если используешь ORM функции)
 
-FastAPI-specific guidelines
-- Use functional components (simple functions) and Pydantic models to validate input and response schemas.
-- Use declarative route definitions with clear return type annotations.
-- Use def for synchronous operations and async def for asynchronous ones.
-- Minimize @app.on_event("startup") and @app.on_event("shutdown"); , favor lifecycle context managers to manage startup and shutdown events.
-- Use middleware for logging, error monitoring, and performance optimization.
-- Optimize performance by using async functions for I/O-bound tasks, caching strategies, and lazy loading.
-- Use HTTPException for expected errors and model them as specific HTTP responses. – Use middleware to handle unexpected errors, logging, and error monitoring.
-- Use Pydantic's BaseModel for consistent I/O validation and response schemas.
+Специфичные рекомендации для FastAPI
+- Используй функциональные компоненты (простые функции) и Pydantic модели для валидации схем ввода и ответа.
+- Используй декларативные определения роутов с четкими аннотациями типов возврата.
+- Используй def для синхронных операций и async def для асинхронных.
+- Минимизируй @app.on_event("startup") и @app.on_event("shutdown"); предпочитай lifecycle context managers для управления событиями запуска и завершения.
+- Используй middleware для логирования, мониторинга ошибок и оптимизации производительности.
+- Оптимизируй производительность используя async функции для I/O-bound задач, стратегии кеширования и ленивую загрузку.
+- Используй HTTPException для ожидаемых ошибок и моделируй их как специфичные HTTP ответы.
+- Используй middleware для обработки неожиданных ошибок, логирования и мониторинга ошибок.
+- Используй Pydantic BaseModel для согласованной валидации I/O и схем ответов.
 
-Performance Optimization
-- Minimize blocking I/O; use async operations for all database calls and external API requests.
-- Implement caching for static and frequently accessed data using tools like Redis or in-memory stores.
-- Optimize data serialization and deserialization with Pydantic.
-- Use lazy loading techniques for large data sets and large API responses.
+Оптимизация производительности
+- Минимизируй блокирующий I/O; используй async операции для всех вызовов базы данных и внешних API запросов.
+- Реализуй кеширование для статических и часто запрашиваемых данных используя инструменты как Redis или in-memory хранилища.
+- Оптимизируй сериализацию и десериализацию данных с Pydantic.
+- Используй техники ленивой загрузки для больших наборов данных и больших API ответов.
 
-Basic conventions
-1. Use the FastAPI dependency injection system to manage state and shared resources.
-2. Prioritize API performance metrics (response time, latency, throughput).
-3. Limit blocking operations in routes:
-- Prefer asynchronous and non-blocking streams.
-- Use dedicated asynchronous functions for database and external API operations. - Clearly structure routes and dependencies to optimize readability and maintainability.
+Базовые соглашения
+1. Используй систему dependency injection FastAPI для управления состоянием и общими ресурсами.
+2. Приоритизируй метрики производительности API (время ответа, задержка, пропускная способность).
+3. Ограничь блокирующие операции в роутах:
+- Предпочитай асинхронные и неблокирующие потоки.
+- Используй выделенные асинхронные функции для операций с базой данных и внешними API.
+- Четко структурируй роуты и зависимости для оптимизации читаемости и поддерживаемости.
 
-See the FastAPI documentation for recommendations on data models, path operations, and middleware.
+Смотри документацию FastAPI для рекомендаций по моделям данных, path операциям и middleware.
+
+Специфичные правила для данного проекта (Bookshelf API)
+- Используй гибридный async/sync подход: async endpoints + asyncio.to_thread() для sync сервисов
+- Создавай новые экземпляры сервисов для каждого запроса через dependency injection (не singleton)
+- Для базы данных: AsyncDatabaseService для startup/shutdown, SyncDatabaseService для бизнес-логики
+- Используй structlog для структурного логирования с LoggerMixin
+- Предпочитай TypedDict для внутренних структур данных, BaseModel для API схем
+- Background tasks используй для долгих операций (обработка файлов)
+- Обрабатывай ошибки через factory функции (validation_http_error, not_found_http_error, internal_server_http_error)
+- Используй SQLAlchemy 2.0+ синтаксис с select() и session patterns
+- Для внешних сервисов (Pinecone, Ollama, LangChain) создавай отдельные сервисные классы
+- Валидируй конфигурацию при старте через Settings.validate_runtime_dependencies()
+- Используй namespace паттерн для изоляции данных в Pinecone (book_{book_id})
+- Логируй операции с контекстом (book_id, filename, status) для трассировки

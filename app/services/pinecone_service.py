@@ -12,10 +12,9 @@ Public methods:
 
 from __future__ import annotations
 
-import asyncio
-from contextlib import asynccontextmanager
+from contextlib import contextmanager
 from pinecone import Pinecone, ServerlessSpec
-from typing import List, Optional, Tuple, Dict, Any, AsyncGenerator, TYPE_CHECKING
+from typing import List, Optional, Tuple, Dict, Any, Generator, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pinecone import Index
@@ -51,16 +50,16 @@ class PineconeService(LoggerMixin):
     def create_index_name(self, book_id: str) -> str:
         return f"book-{book_id}"
 
-    @asynccontextmanager
-    async def get_index(self, index_name: str) -> AsyncGenerator[Index, None]:
-        """Context manager for getting Pinecone index with proper async handling."""
+    @contextmanager
+    def get_index(self, index_name: str) -> Generator[Index, None, None]:
+        """Context manager for getting Pinecone index."""
         if index_name in self._index_cache:
             yield self._index_cache[index_name]
             return
 
         try:
             self.logger.debug("Creating index connection", index_name=index_name)
-            index = await asyncio.to_thread(lambda: self.pc.Index(index_name))
+            index = self.pc.Index(index_name)
             self._index_cache[index_name] = index
             yield index
         except Exception as e:
@@ -69,10 +68,10 @@ class PineconeService(LoggerMixin):
             )
             raise PineconeServiceError(f"Failed to get index {index_name}: {e}") from e
 
-    async def _describe_index(self, name: str) -> Dict[str, Any]:
-        """Async wrapper for describe_index."""
+    def _describe_index(self, name: str) -> Dict[str, Any]:
+        """Wrapper for describe_index."""
         try:
-            return await asyncio.to_thread(self.pc.describe_index, name)
+            return self.pc.describe_index(name)
         except Exception as e:
             self.logger.warning(
                 "Failed to describe index", index_name=name, error=str(e)
@@ -109,7 +108,7 @@ class PineconeService(LoggerMixin):
 
         return ServerlessSpec(cloud=cloud, region=region)
 
-    async def query_top_k(
+    def query_top_k(
         self,
         book_id: str,
         vector: List[float],
@@ -153,9 +152,8 @@ class PineconeService(LoggerMixin):
                 vector_dim=len(vector),
             )
 
-            async with self.get_index(idx_name) as index:
-                resp = await asyncio.to_thread(
-                    index.query,
+            with self.get_index(idx_name) as index:
+                resp = index.query(
                     vector=vector,
                     top_k=top_k,
                     namespace=namespace,
@@ -188,7 +186,7 @@ class PineconeService(LoggerMixin):
             )
             raise PineconeServiceError(f"Query failed for book {book_id}: {e}") from e
 
-    async def ensure_index_for_dimension(
+    def ensure_index_for_dimension(
         self, desired_dim: int, target: Optional[str] = None
     ) -> str:
         if not target:
@@ -207,10 +205,10 @@ class PineconeService(LoggerMixin):
 
             return existing, _create_index
 
-        existing, _create_index = await asyncio.to_thread(_sync_operations)
+        existing, _create_index = _sync_operations()
 
         if target in existing:
-            info = await self._describe_index(target)
+            info = self._describe_index(target)
             dim = info.get("dimension") or info.get("index_config", {}).get("dimension")
             if not dim:
                 new_name = f"{self.index_name}-dense-{desired_dim}"
@@ -218,7 +216,7 @@ class PineconeService(LoggerMixin):
                     self.logger.info(
                         "Creating new index", index_name=new_name, dimension=desired_dim
                     )
-                    await asyncio.to_thread(_create_index, new_name, desired_dim)
+                    _create_index(new_name, desired_dim)
                 target = new_name
             elif int(dim) != int(desired_dim):
                 new_name = f"{self.index_name}-dense-{desired_dim}"
@@ -228,25 +226,25 @@ class PineconeService(LoggerMixin):
                         index_name=new_name,
                         dimension=desired_dim,
                     )
-                    await asyncio.to_thread(_create_index, new_name, desired_dim)
+                    _create_index(new_name, desired_dim)
                 target = new_name
         else:
             # Create the requested index with ServerlessSpec
             self.logger.info(
                 "Creating new index", index_name=target, dimension=desired_dim
             )
-            await asyncio.to_thread(_create_index, target, desired_dim)
+            _create_index(target, desired_dim)
 
         self.logger.info("Index ensured", index_name=target, dimension=desired_dim)
         return target
 
-    async def upsert(
+    def upsert(
         self,
         vectors: List[Tuple[str, List[float], Dict[str, Any]]],
         index_name: str,
         namespace: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Async upsert operation."""
+        """Upsert operation."""
         if not vectors:
             raise PineconeServiceError("No vectors provided for upsert")
 
@@ -258,10 +256,8 @@ class PineconeService(LoggerMixin):
                 namespace=namespace,
             )
 
-            async with self.get_index(index_name) as index:
-                result = await asyncio.to_thread(
-                    index.upsert, vectors=vectors, namespace=namespace
-                )
+            with self.get_index(index_name) as index:
+                result = index.upsert(vectors=vectors, namespace=namespace)
 
                 self.logger.debug(
                     "Upsert completed", index_name=index_name, count=len(vectors)
@@ -274,11 +270,11 @@ class PineconeService(LoggerMixin):
             )
             raise PineconeServiceError(f"Upsert failed: {e}") from e
 
-    async def delete_index(self, name: str) -> None:
-        """Async deletion of Pinecone index."""
+    def delete_index(self, name: str) -> None:
+        """Deletion of Pinecone index."""
         try:
             self.logger.info("Deleting index", index_name=name)
-            await asyncio.to_thread(self.pc.delete_index, name)
+            self.pc.delete_index(name)
 
             # Remove from cache if present
             if name in self._index_cache:
@@ -289,21 +285,17 @@ class PineconeService(LoggerMixin):
             self.logger.error("Failed to delete index", index_name=name, error=str(e))
             raise PineconeServiceError(f"Failed to delete index {name}: {e}") from e
 
-    async def list_indexes(self) -> List[str]:
+    def list_indexes(self) -> List[str]:
         """List all available Pinecone indexes."""
         try:
-
-            def _sync_list():
-                return [i["name"] for i in self.pc.list_indexes()]
-
-            indexes = await asyncio.to_thread(_sync_list)
+            indexes = [i["name"] for i in self.pc.list_indexes()]
             self.logger.debug("Listed indexes", count=len(indexes))
             return indexes
         except Exception as e:
             self.logger.error("Failed to list indexes", error=str(e))
             raise PineconeServiceError(f"Failed to list indexes: {e}") from e
 
-    async def get_book_metadata(self, book_id: str) -> MetaBook:
+    def get_book_metadata(self, book_id: str) -> MetaBook:
         """
         Collect metadata for uploaded book (namespace = f"book_{book_id}").
 
@@ -327,7 +319,7 @@ class PineconeService(LoggerMixin):
         }
 
         # Get index info and stats
-        info = await self._describe_index(index_name)
+        info = self._describe_index(index_name)
         host = info.get("host") or info.get("server", {}).get("host") or index_name
         if not host:
             raise RuntimeError(
@@ -356,7 +348,7 @@ class PineconeService(LoggerMixin):
                     except Exception:
                         return {}
 
-            stats = await asyncio.to_thread(_get_stats)
+            stats = _get_stats()
         except Exception:
             stats = {}
 
@@ -397,7 +389,7 @@ class PineconeService(LoggerMixin):
         # Try to get sample metadata from one element in namespace
         # Need vector dimension to make dummy query (zero vector)
         try:
-            info = await self._describe_index(index_name) or {}
+            info = self._describe_index(index_name) or {}
             dim = info.get("dimension") or info.get("index_config", {}).get("dimension")
             if dim:
                 dim = int(dim)
@@ -405,9 +397,8 @@ class PineconeService(LoggerMixin):
                 zero_vec = [0.0] * dim
                 # Safely query top_k=1 in specific namespace
                 try:
-                    async with self.get_index(index_name) as index:
-                        resp = await asyncio.to_thread(
-                            index.query,
+                    with self.get_index(index_name) as index:
+                        resp = index.query(
                             vector=zero_vec,
                             top_k=1,
                             namespace=namespace,

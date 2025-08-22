@@ -58,8 +58,8 @@ def get_bookshelf_service(
 
 def get_background_processor(
     settings: Annotated[Settings, Depends(get_settings)],
-    database: Annotated[DatabaseService, Depends(get_database_service)],
+    database: Annotated[SyncDatabaseService, Depends(get_sync_database_service)],
 ) -> BackgroundProcessor:
-    """Get background processor dependency - использует async database service."""
+    """Get background processor dependency - использует sync database service."""
     logger.debug("Creating background processor")
     return BackgroundProcessor(settings=settings, database=database)

@@ -10,7 +10,7 @@ import asyncio
 from typing import Dict, Any, List
 
 from app.services.pinecone_service import PineconeService
-from app.services.database_service import DatabaseService  # Async версия для background tasks
+from app.services.database_service import SyncDatabaseService
 from app.services.document_processing_service import DocumentProcessingService
 from app.core.config import Settings
 from app.core.logging import LoggerMixin
@@ -18,11 +18,11 @@ from app.core.exceptions import DocumentProcessingError, PineconeServiceError
 
 
 class BackgroundProcessor(LoggerMixin):
-    """Separate class for background file processing - остается асинхронным"""
+    """Separate class for background file processing - использует синхронную базу данных"""
 
-    def __init__(self, settings: Settings, database: DatabaseService):
+    def __init__(self, settings: Settings, database: SyncDatabaseService):
         self.settings = settings
-        self.database = database  # Async DatabaseService для background tasks
+        self.database = database  # Sync DatabaseService для консистентности
         self.pinecone = PineconeService(settings=settings)
         self.document_processor = DocumentProcessingService(settings=settings)
         self.logger.info("BackgroundProcessor initialized")
@@ -34,12 +34,12 @@ class BackgroundProcessor(LoggerMixin):
         """
         self.logger.info("Starting file processing", book_id=book_id)
 
-        job = await self.database.get_job(book_id)
+        job = self.database.get_job(book_id)
         if not job:
             self.logger.error("Job not found", book_id=book_id)
             return
 
-        await self.database.update_job(book_id, {"status": "processing"})
+        self.database.update_job(book_id, {"status": "processing"})
         path = job.get("path")
         filename = job.get("filename")
         namespace = job.get("namespace")
@@ -62,7 +62,7 @@ class BackgroundProcessor(LoggerMixin):
                 embedding_dimension=embedding_dimension,
             )
 
-            await self.database.update_job(
+            self.database.update_job(
                 book_id,
                 {
                     "total_chunks": total_chunks,
@@ -77,22 +77,24 @@ class BackgroundProcessor(LoggerMixin):
                 raise DocumentProcessingError("Failed to determine embedding dimension")
 
             index_name = self.pinecone.create_index_name(book_id)
-            chosen_index = await self.pinecone.ensure_index_for_dimension(
-                embedding_dimension, index_name
+            chosen_index = await asyncio.to_thread(
+                self.pinecone.ensure_index_for_dimension, 
+                embedding_dimension, 
+                index_name
             )
-            await self.database.update_job(book_id, {"index_name": chosen_index})
+            self.database.update_job(book_id, {"index_name": chosen_index})
 
             # Upload data to Pinecone in batches
             await self._upsert_chunks_to_pinecone(
                 chunks_with_embeddings, namespace, book_id, job, chosen_index
             )
 
-            await self.database.finish_job(book_id, success=True)
+            self.database.finish_job(book_id, success=True)
             self.logger.info("File processing completed successfully", book_id=book_id)
 
         except Exception as e:
             self.logger.error("File processing failed", book_id=book_id, error=str(e))
-            await self.database.finish_job(book_id, success=False, error=str(e))
+            self.database.finish_job(book_id, success=False, error=str(e))
         finally:
             # Remove temporary file
             try:
@@ -134,13 +136,16 @@ class BackgroundProcessor(LoggerMixin):
                 )
 
                 # Upload to Pinecone
-                await self.pinecone.upsert(
-                    upsert_data, index_name=index_name, namespace=namespace
+                await asyncio.to_thread(
+                    self.pinecone.upsert,
+                    upsert_data, 
+                    index_name=index_name, 
+                    namespace=namespace
                 )
 
                 # Update progress
                 processed_count += len(batch_chunks)
-                await self.database.increment_processed(book_id, n=len(batch_chunks))
+                self.database.increment_processed(book_id, n=len(batch_chunks))
 
                 self.logger.debug(
                     "Batch upserted",
@@ -168,7 +173,7 @@ class BackgroundProcessor(LoggerMixin):
         """Best-effort notifier. Non-blocking."""
         import httpx
 
-        payload = await self.database.get_job(job_id)
+        payload = self.database.get_job(job_id)
         try:
             async with httpx.AsyncClient() as client:
                 await client.post(callback_url, json=payload, timeout=5.0)
