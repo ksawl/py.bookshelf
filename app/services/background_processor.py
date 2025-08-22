@@ -2,6 +2,7 @@
 """
 Separate service for background file processing.
 Isolated from main BookshelfService for better architecture.
+BackgroundProcessor остается асинхронным, так как он запускается как background task.
 """
 
 import os
@@ -9,7 +10,7 @@ import asyncio
 from typing import Dict, Any, List
 
 from app.services.pinecone_service import PineconeService
-from app.services.database_service import DatabaseService
+from app.services.database_service import DatabaseService  # Async версия для background tasks
 from app.services.document_processing_service import DocumentProcessingService
 from app.core.config import Settings
 from app.core.logging import LoggerMixin
@@ -17,11 +18,11 @@ from app.core.exceptions import DocumentProcessingError, PineconeServiceError
 
 
 class BackgroundProcessor(LoggerMixin):
-    """Separate class for background file processing"""
+    """Separate class for background file processing - остается асинхронным"""
 
     def __init__(self, settings: Settings, database: DatabaseService):
         self.settings = settings
-        self.database = database
+        self.database = database  # Async DatabaseService для background tasks
         self.pinecone = PineconeService(settings=settings)
         self.document_processor = DocumentProcessingService(settings=settings)
         self.logger.info("BackgroundProcessor initialized")
