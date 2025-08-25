@@ -1,7 +1,7 @@
 # app/services/__init__.py
 
 from .bookshelf_service import BookshelfService
-from .database_service import DatabaseService
+from .database_service import DatabaseService, SyncDatabaseService
 from .pinecone_service import PineconeService
 from .document_processing_service import DocumentProcessingService
 from .background_processor import BackgroundProcessor
@@ -9,6 +9,7 @@ from .background_processor import BackgroundProcessor
 __all__ = [
     "BookshelfService",
     "DatabaseService",
+    "SyncDatabaseService",
     "PineconeService",
     "DocumentProcessingService",
     "BackgroundProcessor",

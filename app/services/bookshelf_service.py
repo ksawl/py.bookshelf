@@ -49,28 +49,13 @@ class BookshelfService(LoggerMixin):
         return self.database.get_job(book_id)
 
     def get_book(self, book_id: str) -> MetaBook:
-        # Note: Pinecone service methods are still async, we'll need to run them in sync
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        book = loop.run_until_complete(self.pinecone.get_book_metadata(book_id))
+        book = self.pinecone.get_book_metadata(book_id)
         return book
 
     def get_all_books(self) -> list[str]:
         """Get all books with synchronization between Pinecone and database"""
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
         # Get indexes from Pinecone and jobs from DB
-        pinecone_indexes = loop.run_until_complete(self.pinecone.list_indexes())
+        pinecone_indexes = self.pinecone.list_indexes()
         all_jobs = self.database.get_all_jobs()
 
         # Extract book_id from completed jobs
@@ -85,19 +70,19 @@ class BookshelfService(LoggerMixin):
                 pinecone_book_ids.add(book_id)
 
         # Synchronize discrepancies
-        self._sync_pinecone_and_db(pinecone_book_ids, db_book_ids, loop)
+        self._sync_pinecone_and_db(pinecone_book_ids, db_book_ids)
 
         # Return actual list of book_id
         return list(pinecone_book_ids - (db_book_ids - pinecone_book_ids))
 
-    def _sync_pinecone_and_db(self, pinecone_book_ids: set, db_book_ids: set, loop):
+    def _sync_pinecone_and_db(self, pinecone_book_ids: set, db_book_ids: set):
         """Synchronization between Pinecone and database"""
         # Indexes in Pinecone without DB records - create DB records
         orphaned_pinecone = pinecone_book_ids - db_book_ids
         if orphaned_pinecone:
             for book_id in orphaned_pinecone:
                 try:
-                    self._create_db_record_from_pinecone(book_id, loop)
+                    self._create_db_record_from_pinecone(book_id)
                 except Exception:
                     pass  # Continue with other records
 
@@ -110,10 +95,10 @@ class BookshelfService(LoggerMixin):
                 except Exception:
                     pass  # Continue with other records
 
-    def _create_db_record_from_pinecone(self, book_id: str, loop):
+    def _create_db_record_from_pinecone(self, book_id: str):
         """Create DB record based on Pinecone metadata"""
         try:
-            book_metadata = loop.run_until_complete(self.pinecone.get_book_metadata(book_id))
+            book_metadata = self.pinecone.get_book_metadata(book_id)
             namespace = f"book_{book_id}"
             index_name = self.pinecone.create_index_name(book_id)
 
@@ -136,26 +121,20 @@ class BookshelfService(LoggerMixin):
     def ask_book_question(self, book_id: str, question: str) -> Answer:
         """Get LLM response based on book context"""
         try:
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+            # Get embedding synchronously
+            q_emb_list = self.bp.get_embeddings_sync([question])
             
-            # Get embedding and query Pinecone
-            q_emb_list = loop.run_until_complete(self.bp.get_embeddings([question]))
             if not q_emb_list:
                 raise RuntimeError("get_embeddings returned empty result")
 
             q_emb = q_emb_list[0]
-            resp = loop.run_until_complete(self.pinecone.query_top_k(
+            resp = self.pinecone.query_top_k(
                 book_id,
                 vector=q_emb,
                 top_k=self.settings.TOP_K,
                 include_metadata=True,
                 include_values=False,
-            ))
+            )
 
             # Process search results
             matches = resp.get("matches", []) if isinstance(resp, dict) else []
@@ -165,7 +144,8 @@ class BookshelfService(LoggerMixin):
             combined_context = self._build_context(context_chunks)
             prompt = self._build_prompt(combined_context, question)
 
-            llm_resp_text = loop.run_until_complete(self.llm.ainvoke(prompt))
+            # Synchronous LLM call
+            llm_resp_text = self.llm.invoke(prompt)
 
             return Answer(
                 text=llm_resp_text,
@@ -177,7 +157,7 @@ class BookshelfService(LoggerMixin):
             )
 
         except Exception as e:
-            print(f"Error in ask_book_question: {e}")
+            self.logger.error("Error in ask_book_question", book_id=book_id, error=str(e))
             return Answer(text=f"Error processing request: {e}", sources=[], prompt="")
 
     def _process_search_matches(
@@ -240,16 +220,9 @@ class BookshelfService(LoggerMixin):
             return {"success": False, "message": f"Book with id {book_id} not found"}
 
         try:
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            
             # Delete index from Pinecone
             index_name = self.pinecone.create_index_name(book_id)
-            loop.run_until_complete(self.pinecone.delete_index(index_name))
+            self.pinecone.delete_index(index_name)
             self.logger.info(
                 "Pinecone index deleted", book_id=book_id, index_name=index_name
             )

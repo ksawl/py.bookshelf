@@ -1,7 +1,7 @@
 # app/core/database_engine.py
 
 from sqlalchemy import create_engine
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import StaticPool, QueuePool
 from functools import lru_cache
@@ -65,17 +65,6 @@ def get_sync_database_engine(database_url: str):
 
 
 @lru_cache()
-def get_session_maker(database_url: str):
-    """Create and cache async session maker"""
-    engine = get_database_engine(database_url)
-    return async_sessionmaker(
-        engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-    )
-
-
-@lru_cache()
 def get_sync_session_maker(database_url: str):
     """Create and cache synchronous session maker"""
     engine = get_sync_database_engine(database_url)
@@ -84,17 +73,3 @@ def get_sync_session_maker(database_url: str):
         class_=Session,
         expire_on_commit=False,
     )
-
-
-async def get_async_session(database_url: str) -> AsyncSession:
-    """Get async database session"""
-    session_maker = get_session_maker(database_url)
-    async with session_maker() as session:
-        yield session
-
-
-def get_sync_session(database_url: str) -> Session:
-    """Get synchronous database session"""
-    session_maker = get_sync_session_maker(database_url)
-    with session_maker() as session:
-        yield session
