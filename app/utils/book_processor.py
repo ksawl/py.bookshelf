@@ -149,7 +149,7 @@ class BookProcessor:
 
         return chunks
 
-    def _encode_sync(
+    def get_embeddings_sync(
         self, texts: List[str], batch_size: int = 64, normalize: bool = True
     ) -> List[List[float]]:
         """
@@ -171,7 +171,7 @@ class BookProcessor:
 
     async def get_embeddings(self, texts: List[str]) -> List[List[float]]:
         # Wrap sync call in separate thread to not block FastAPI loop
-        return await asyncio.to_thread(self._encode_sync, texts)
+        return await asyncio.to_thread(self.get_embeddings_sync, texts)
 
     def sanitize_metadata(self, meta: Dict[str, Any]) -> Dict[str, Any]:
         """

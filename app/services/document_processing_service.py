@@ -18,7 +18,7 @@ class DocumentProcessingService:
         self._settings = settings
         self.bp = BookProcessor(settings=settings)
 
-    async def process_document(
+    def process_document(
         self, book_id: str, file_path: str, filename: str
     ) -> Dict[str, Any]:
         """
@@ -38,21 +38,21 @@ class DocumentProcessingService:
 
         file_extension = self.bp.detect_extension(filename, raw_data)
 
-        # Extract text and structural information
-        text_content, structural_info = await self._extract_text_and_structure(
+        # Extract text and structural information (синхронно)
+        text_content, structural_info = self._extract_text_and_structure(
             file_path, file_extension, raw_data
         )
 
         # Split into chunks
         raw_chunks = self.bp.split_into_token_chunks(text_content)
 
-        # Enrich chunks with metadata and create final text for embeddings
-        enriched_chunks = await self._enrich_chunks_with_metadata(
+        # Enrich chunks with metadata and create final text for embeddings (синхронно)
+        enriched_chunks = self._enrich_chunks_with_metadata(
             raw_chunks, book_id, filename, structural_info
         )
 
-        # Generate embeddings in batches
-        chunks_with_embeddings = await self._generate_embeddings_for_chunks(
+        # Generate embeddings in batches (синхронно)
+        chunks_with_embeddings = self._generate_embeddings_for_chunks(
             enriched_chunks
         )
 
@@ -75,7 +75,7 @@ class DocumentProcessingService:
 
         return result
 
-    async def _extract_text_and_structure(
+    def _extract_text_and_structure(
         self, file_path: str, file_extension: str, raw_data: bytes
     ) -> Tuple[str, Dict[str, Any]]:
         """
@@ -114,7 +114,7 @@ class DocumentProcessingService:
 
         return text_content, structural_info
 
-    async def _enrich_chunks_with_metadata(
+    def _enrich_chunks_with_metadata(
         self,
         raw_chunks: List[Dict],
         book_id: str,
@@ -142,7 +142,7 @@ class DocumentProcessingService:
 
             # Add heading information for DOCX
             if headings:
-                heading_chain = await self._find_relevant_heading(
+                heading_chain = self._find_relevant_heading(
                     chunk["token_start"], headings
                 )
                 metadata["heading_chain"] = heading_chain
@@ -158,7 +158,7 @@ class DocumentProcessingService:
 
             # Add page information for PDF
             if pages:
-                page_info = await self._find_relevant_page(chunk["token_start"], pages)
+                page_info = self._find_relevant_page(chunk["token_start"], pages)
                 metadata.update(page_info)
 
             # Sanitize metadata for Pinecone
@@ -175,7 +175,7 @@ class DocumentProcessingService:
 
         return enriched_chunks
 
-    async def _find_relevant_heading(
+    def _find_relevant_heading(
         self, token_position: int, headings: List[Tuple[int, str]]
     ) -> Optional[str]:
         """
@@ -194,7 +194,7 @@ class DocumentProcessingService:
 
         return relevant_heading
 
-    async def _find_relevant_page(
+    def _find_relevant_page(
         self, token_position: int, pages: List[Dict]
     ) -> Dict[str, Any]:
         """
@@ -213,7 +213,7 @@ class DocumentProcessingService:
 
         return page_info
 
-    async def _generate_embeddings_for_chunks(
+    def _generate_embeddings_for_chunks(
         self, enriched_chunks: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """
@@ -225,8 +225,8 @@ class DocumentProcessingService:
         # Extract texts for embeddings
         texts_for_embedding = [chunk["text"] for chunk in enriched_chunks]
 
-        # Generate embeddings
-        embeddings = await self.bp.get_embeddings(texts_for_embedding)
+        # Generate embeddings synchronously
+        embeddings = self.bp.get_embeddings_sync(texts_for_embedding)
 
         # Add embeddings to chunks
         chunks_with_embeddings = []

@@ -2,11 +2,10 @@
 """
 Separate service for background file processing.
 Isolated from main BookshelfService for better architecture.
-BackgroundProcessor остается асинхронным, так как он запускается как background task.
+BackgroundProcessor теперь полностью синхронный - FastAPI может запускать sync функции в background tasks.
 """
 
 import os
-import asyncio
 from typing import Dict, Any, List
 
 from app.services.pinecone_service import PineconeService
@@ -27,7 +26,7 @@ class BackgroundProcessor(LoggerMixin):
         self.document_processor = DocumentProcessingService(settings=settings)
         self.logger.info("BackgroundProcessor initialized")
 
-    async def process_file(self, book_id: str) -> None:
+    def process_file(self, book_id: str) -> None:
         """
         Process file using DocumentProcessingService.
         Isolated method for background tasks.
@@ -47,7 +46,7 @@ class BackgroundProcessor(LoggerMixin):
         try:
             # Process document through specialized service
             self.logger.info("Processing document", book_id=book_id, filename=filename)
-            processing_result = await self.document_processor.process_document(
+            processing_result = self.document_processor.process_document(
                 book_id, path, filename
             )
 
@@ -77,15 +76,13 @@ class BackgroundProcessor(LoggerMixin):
                 raise DocumentProcessingError("Failed to determine embedding dimension")
 
             index_name = self.pinecone.create_index_name(book_id)
-            chosen_index = await asyncio.to_thread(
-                self.pinecone.ensure_index_for_dimension, 
-                embedding_dimension, 
-                index_name
+            chosen_index = self.pinecone.ensure_index_for_dimension(
+                embedding_dimension, index_name
             )
             self.database.update_job(book_id, {"index_name": chosen_index})
 
             # Upload data to Pinecone in batches
-            await self._upsert_chunks_to_pinecone(
+            self._upsert_chunks_to_pinecone(
                 chunks_with_embeddings, namespace, book_id, job, chosen_index
             )
 
@@ -106,7 +103,7 @@ class BackgroundProcessor(LoggerMixin):
                     "Failed to remove temporary file", path=path, error=str(e)
                 )
 
-    async def _upsert_chunks_to_pinecone(
+    def _upsert_chunks_to_pinecone(
         self,
         chunks_with_embeddings: List[Dict[str, Any]],
         namespace: str,
@@ -135,9 +132,8 @@ class BackgroundProcessor(LoggerMixin):
                     batch_chunks
                 )
 
-                # Upload to Pinecone
-                await asyncio.to_thread(
-                    self.pinecone.upsert,
+                # Upload to Pinecone (synchronously)
+                self.pinecone.upsert(
                     upsert_data, 
                     index_name=index_name, 
                     namespace=namespace
@@ -155,10 +151,10 @@ class BackgroundProcessor(LoggerMixin):
                     total=total_chunks,
                 )
 
-                # Notify callback if present
+                # Notify callback if present (упрощенно, без асинхронности)
                 callback_url = job.get("callback_url")
                 if callback_url:
-                    asyncio.create_task(self._notify_callback(callback_url, book_id))
+                    self._notify_callback_sync(callback_url, book_id)
 
             except Exception as e:
                 self.logger.error(
@@ -169,14 +165,13 @@ class BackgroundProcessor(LoggerMixin):
                 )
                 raise PineconeServiceError(f"Failed to upsert batch: {e}") from e
 
-    async def _notify_callback(self, callback_url: str, job_id: str):
-        """Best-effort notifier. Non-blocking."""
-        import httpx
+    def _notify_callback_sync(self, callback_url: str, job_id: str):
+        """Best-effort notifier. Synchronous version."""
+        import requests
 
         payload = self.database.get_job(job_id)
         try:
-            async with httpx.AsyncClient() as client:
-                await client.post(callback_url, json=payload, timeout=5.0)
+            requests.post(callback_url, json=payload, timeout=5.0)
         except Exception:
             # Ignore failures for now
             pass

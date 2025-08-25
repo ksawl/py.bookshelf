@@ -121,11 +121,8 @@ class BookshelfService(LoggerMixin):
     def ask_book_question(self, book_id: str, question: str) -> Answer:
         """Get LLM response based on book context"""
         try:
-            import asyncio
-            # Get embedding and query Pinecone
-            loop = asyncio.new_event_loop()
-            q_emb_list = loop.run_until_complete(self.bp.get_embeddings([question]))
-            loop.close()
+            # Get embedding synchronously
+            q_emb_list = self.bp.get_embeddings_sync([question])
             
             if not q_emb_list:
                 raise RuntimeError("get_embeddings returned empty result")
@@ -147,10 +144,8 @@ class BookshelfService(LoggerMixin):
             combined_context = self._build_context(context_chunks)
             prompt = self._build_prompt(combined_context, question)
 
-            # LLM call is still async
-            loop = asyncio.new_event_loop()
-            llm_resp_text = loop.run_until_complete(self.llm.ainvoke(prompt))
-            loop.close()
+            # Synchronous LLM call
+            llm_resp_text = self.llm.invoke(prompt)
 
             return Answer(
                 text=llm_resp_text,
@@ -162,7 +157,7 @@ class BookshelfService(LoggerMixin):
             )
 
         except Exception as e:
-            print(f"Error in ask_book_question: {e}")
+            self.logger.error("Error in ask_book_question", book_id=book_id, error=str(e))
             return Answer(text=f"Error processing request: {e}", sources=[], prompt="")
 
     def _process_search_matches(
